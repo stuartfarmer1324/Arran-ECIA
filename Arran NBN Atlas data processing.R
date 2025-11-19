@@ -156,3 +156,101 @@ print(p_abund)
 
 ggsave(file.path(out_dir, "plot_species_richness.png"), p_rich, width = 6.5, height = 4, dpi = 300)
 ggsave(file.path(out_dir, "plot_record_abundance.png"), p_abund, width = 6.5, height = 4, dpi = 300)
+
+
+
+#----"important" species----
+library(tidyverse)
+
+# Load cleaned NBN tables you already created
+out_dir <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas"
+nbn <- bind_rows(
+  readr::read_csv(file.path(out_dir, "nbn_species_clean_north.csv"), show_col_types = FALSE),
+  readr::read_csv(file.path(out_dir, "nbn_species_clean_south.csv"), show_col_types = FALSE)
+) %>%
+  mutate(
+    hillside = factor(site_id, levels = c("North","South")),
+    scientific_name = str_squish(scientific_name),
+    genus = ifelse(is.na(genus) | genus == "", word(scientific_name, 1), genus),
+    number_of_records = as.integer(number_of_records)
+  )
+
+# Rule-based tag for important/protected (publicly-known examples you mentioned)
+eps_bats <- c("Plecotus auritus","Nyctalus leisleri",
+              "Pipistrellus pipistrellus","Pipistrellus pygmaeus","Pipistrellus nathusii")
+sched1_birds <- c("Aquila chrysaetos","Thalasseus sandvicensis","Gavia immer")  # golden eagle, sandwich tern, great northern diver
+protected_mammals <- c("Meles meles","Sciurus vulgaris")                        # badger, red squirrel
+redlist_cr <- c("Anguilla anguilla")                                           # European eel (CR)
+sbl_priority <- c("Alauda arvensis","Turdus philomelos","Numenius arquata","Sciurus vulgaris")
+inns_species <- c("Rhododendron ponticum")
+potential_inns_genus <- c("Cotoneaster")                                       # some spp. Schedule 9 (flag as potential)
+
+nbn_imp <- nbn %>%
+  mutate(
+    importance_class = case_when(
+      # exact species first
+      scientific_name %in% eps_bats ~ "EPS",
+      scientific_name %in% sched1_birds ~ "WCA Sch.1 birds",
+      scientific_name %in% protected_mammals ~ "Protected mammals",
+      scientific_name %in% redlist_cr ~ "Red List (CR)",
+      scientific_name %in% sbl_priority ~ "SBL priority",
+      scientific_name %in% inns_species ~ "INNS (Sch.9)",
+      # genus-level cautious flags
+      genus %in% potential_inns_genus ~ "Potential INNS",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(importance_class))
+
+# Palette and order
+imp_cols <- c(
+  "EPS" = "#6a3d9a",
+  "WCA Sch.1 birds" = "#1f78b4",
+  "Protected mammals" = "#e31a1c",
+  "Red List (CR)" = "#fb9a99",
+  "SBL priority" = "#33a02c",
+  "INNS (Sch.9)" = "#ff7f00",
+  "Potential INNS" = "#fdbf6f"
+)
+nbn_imp <- nbn_imp %>%
+  mutate(importance_class = factor(importance_class, levels = names(imp_cols)))
+
+# Richness (distinct species) per class x hillside, fixed y across facets
+imp_rich <- nbn_imp %>%
+  distinct(hillside, importance_class, scientific_name) %>%
+  count(hillside, importance_class, name = "richness")
+
+ymax_rich <- max(imp_rich$richness, na.rm = TRUE)
+
+p_imp_rich_nbn <- ggplot(imp_rich, aes(importance_class, richness, fill = importance_class)) +
+  geom_col(width = 0.7, colour = "white") +
+  facet_wrap(~ hillside, nrow = 1) +
+  scale_fill_manual(values = imp_cols, guide = "none") +
+  scale_y_continuous(limits = c(0, ymax_rich * 1.1), expand = expansion(mult = c(0, 0.05))) +
+  labs(title = "NBN — important/protected species richness",
+       subtitle = "Distinct species per hillside (fixed y-scale across facets)",
+       x = NULL, y = "Species richness") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+p_imp_rich_nbn
+
+# Abundance (sum of records) per class x hillside, fixed y across facets
+imp_abund <- nbn_imp %>%
+  group_by(hillside, importance_class) %>%
+  summarise(total_records = sum(replace_na(number_of_records, 0L)), .groups = "drop")
+
+ymax_abund <- max(imp_abund$total_records, na.rm = TRUE)
+
+p_imp_abund_nbn <- ggplot(imp_abund, aes(importance_class, total_records, fill = importance_class)) +
+  geom_col(width = 0.7, colour = "white") +
+  facet_wrap(~ hillside, nrow = 1) +
+  scale_fill_manual(values = imp_cols, guide = "none") +
+  scale_y_continuous(limits = c(0, ymax_abund * 1.1), expand = expansion(mult = c(0, 0.05))) +
+  labs(title = "NBN — important/protected species record abundance",
+       subtitle = "Total records per hillside (fixed y-scale across facets)",
+       x = NULL, y = "Records") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+p_imp_abund_nbn
+
+
