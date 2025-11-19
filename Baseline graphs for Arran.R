@@ -374,3 +374,68 @@ for (g in groups_to_plot) {
 }
 
 
+
+
+###Important species graphs###
+
+# Ensure fixed, shared y-scales across North/South facets
+
+# Richness (protected/important only)
+ymax_rich <- max(imp_rich$richness, na.rm = TRUE)
+
+p_imp_rich <- ggplot(imp_rich, aes(x = importance_class, y = richness, fill = importance_class)) +
+  geom_col(width = 0.7, colour = "white") +
+  facet_wrap(~ hillside, nrow = 1) +
+  scale_fill_manual(values = imp_cols, guide = "none") +
+  scale_y_continuous(
+    limits = c(0, ymax_rich * 1.1),
+    expand = expansion(mult = c(0, 0.05)),
+    breaks = scales::pretty_breaks()
+  ) +
+  labs(title = "Important/protected species richness",
+       subtitle = "Distinct species per hillside (fixed y-scale across facets)",
+       x = NULL, y = "Species richness") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+p_imp_rich
+
+# Abundance (protected/important only)
+ymax_abund <- max(imp_abund$total_records, na.rm = TRUE)
+
+p_imp_abund <- ggplot(imp_abund, aes(x = importance_class, y = total_records, fill = importance_class)) +
+  geom_col(width = 0.7, colour = "white") +
+  facet_wrap(~ hillside, nrow = 1) +  # fixed scales (no free_y)
+  scale_fill_manual(values = imp_cols, guide = "none") +
+  scale_y_continuous(
+    limits = c(0, ymax_abund * 1.1),
+    expand = expansion(mult = c(0, 0.05)),
+    breaks = scales::pretty_breaks()
+  ) +
+  labs(title = "Important/protected species record abundance",
+       subtitle = "Total records per hillside (fixed y-scale across facets)",
+       x = NULL, y = "Records") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+p_imp_abund
+
+
+# ---- species-level comparison (only important/protected), by hillside ----
+imp_species <- imp %>%
+  count(hillside, importance_class, scientific_name, name = "records") %>%
+  group_by(scientific_name, importance_class) %>%
+  mutate(total = sum(records)) %>%
+  ungroup() %>%
+  mutate(scientific_name = fct_reorder(scientific_name, total))
+
+p_imp_species <- ggplot(imp_species, aes(x = scientific_name, y = records, fill = hillside)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.65, colour = "white") +
+  coord_flip(clip = "off") +
+  facet_wrap(~ importance_class, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = c("North" = "#1f78b4", "South" = "#33a02c")) +
+  labs(title = "Important/protected species — North vs South",
+       x = NULL, y = "Records", fill = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top",
+        strip.text = element_text(face = "bold"))
+p_imp_species
+
