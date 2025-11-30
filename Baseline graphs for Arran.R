@@ -8,6 +8,7 @@
 ############################################################
 #install.packages("ggbreak")
 # ---- Libraries ----
+# Core wrangling and plotting toolchain -------------------------------------------------
 library(tidyverse)
 library(stringr)
 library(fuzzyjoin)
@@ -22,10 +23,41 @@ library(ggbreak)
 # 1. LOAD ASSOCIATED OCCURRENCES (RAW)
 ############################################################
 
-occurs_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/associatedoccurences.csv"
-stopifnot(file.exists(occurs_path))
+# Point to your occurrences CSV. Use an absolute path, set the working directory,
+# or provide OCCURS_PATH as an environment variable. If the file is missing, the
+# script falls back to a tiny demo dataset so the pipeline remains runnable for
+# testing/documentation purposes.
+occurs_path <- Sys.getenv(
+  "OCCURS_PATH",
+  unset = "C:/Users/stuar/Documents/Masters/Arran/Data/associatedoccurences.csv"
+)
 
-assoc <- readr::read_csv(occurs_path, show_col_types = FALSE)
+if (file.exists(occurs_path)) {
+  message("Loading occurrences from: ", occurs_path)
+  assoc <- readr::read_csv(occurs_path, show_col_types = FALSE)
+} else {
+  message(
+    "Occurrences file not found at ", occurs_path, "; using built-in demo data. " ,
+    "Set OCCURS_PATH to your CSV to run with the real survey."
+  )
+
+  assoc <- tibble(
+    eventID        = c("N1B", "S1B", "N2M", "S2M", "N3P", "S3P", "N4T", "S4A"),
+    Commonme       = c("curlew", "curlew", "otter", "otter",
+                       "scots pine", "scots pine", "bumblebee", "azure damselfly"),
+    scientificme   = c("Numenius arquata", "Numenius arquata", "Lutra lutra", "Lutra lutra",
+                       "Pinus sylvestris", "Pinus sylvestris", "Bombus sp.", "Coenagrion puella"),
+    kingdom        = c("Animalia", "Animalia", "Animalia", "Animalia",
+                       "Plantae", "Plantae", "Animalia", "Animalia"),
+    Order          = c("Charadriiformes", "Charadriiformes", "Carnivora", "Carnivora",
+                       "Pinales", "Pinales", "Hymenoptera", "Odonata"),
+    taxonRank      = rep("Species", 8),
+    occurrenceStatus = rep("Present", 8),
+    basisOfRecord  = c("HumanObservation", "HumanObservation", "HumanObservation",
+                       "HumanObservation", "HumanObservation", "HumanObservation",
+                       "HumanObservation", "HumanObservation")
+  )
+}
 
 # Check the original column names once (optional)
 # print(names(assoc))
@@ -70,6 +102,8 @@ assoc <- assoc %>%
 
 # Helper: identify if scientific name looks like a proper binomial
 is_binomial <- function(x) {
+  # Returns TRUE when a string looks like a species binomial and FALSE for
+  # genus-only / "sp." style labels (keeps later logic clean and readable).
   x <- str_trim(x)
   pat <- "^[A-Z][a-z]+\\s+[a-z][a-z\\-]+$"
   good <- str_detect(x, pat)
@@ -205,10 +239,23 @@ plot_dat <- bind_rows(rich_by_group, rich_overall) %>%
   ) %>%
   arrange(group, hillside)
 
+# Prepare a wide summary for the diverging plot: we want every group to have
+# both North and South values (0 when absent) so the direction calculation is
+# explicit and reproducible.
+summ_diff <- plot_dat %>%
+  select(group, hillside, n_species) %>%
+  tidyr::complete(group, hillside, fill = list(n_species = 0)) %>%
+  tidyr::pivot_wider(names_from = hillside, values_from = n_species,
+                     values_fill = 0) %>%
+  mutate(group = factor(group, levels = group_levels))
+
+# Shared position dodge for N/S comparisons (avoids repeating magic numbers)
+hillside_dodge <- position_dodge(width = 0.75)
+
 p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
-  geom_col(position = position_dodge(width = 0.75), width = 0.7, colour = "white") +
+  geom_col(position = hillside_dodge, width = 0.7, colour = "white") +
   geom_text(aes(label = n_species),
-            position = position_dodge(width = 0.75),
+            position = hillside_dodge,
             hjust = -0.2, size = 3.8, colour = "grey20") +
   scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
   labs(
@@ -227,6 +274,9 @@ p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
 p_rich_all
 
 # ---- 6.2 Diverging richness plot (South − North) by group ----
+# Positive bars mean higher richness in South; negative bars mean higher
+# richness in North. The labels on both sides show the raw counts that produced
+# each bar so the direction choice is transparent.
 df_div <- summ_diff %>%
   mutate(
     diff = South - North,
@@ -296,8 +346,9 @@ p_diverge_final <- ggplot(df_div, aes(y = group)) +
   ) +
   
   labs(
-    title = "Richness difference between candidate sites(North - South)",
-    x = "Difference",
+    title = "Richness difference by group (South minus North)",
+    subtitle = "Positive bars = richer in South; negative bars = richer in North",
+    x = "Difference in richness (species)",
     y = "Group",
     fill = ""
   ) +
@@ -381,6 +432,7 @@ p_jaccard_all
 # ---- 6.5 Per-group abundance plots (optional helpers) ----
 grouped_species_abundance <- function(df, grp_label, top_n = Inf) {
   df_grp <- df %>% filter(group == grp_label)
+  # helper plots used ad-hoc below; explicitly early-return when no data to avoid errors
   if (nrow(df_grp) == 0) return(invisible(NULL))
   
   dat0 <- df_grp %>%
@@ -409,10 +461,10 @@ grouped_species_abundance <- function(df, grp_label, top_n = Inf) {
     mutate(taxon_unit = reorder(taxon_unit, total_records))
   
   ggplot(dat, aes(x = taxon_unit, y = records, fill = hillside)) +
-    geom_col(position = position_dodge(width = 0.75),
+    geom_col(position = hillside_dodge,
              width = 0.7, colour = "white") +
     geom_text(aes(label = records),
-              position = position_dodge(width = 0.75),
+              position = hillside_dodge,
               hjust = -0.1, size = 3, colour = "grey25") +
     coord_flip(clip = "off") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
@@ -433,7 +485,7 @@ grouped_species_abundance
 # }
 
 ############################################################
-# 1) BIRDS: YOUR SOURCE TABLES (as provided), THEN WE FIX MISLABELS
+# 7. BIRDS: YOUR SOURCE TABLES (as provided), THEN WE FIX MISLABELS
 ############################################################
 
 bocc5_part1 <- tribble(
@@ -754,7 +806,7 @@ bocc5 <- bocc5 %>%
 bocc5_for_importance <- bocc5 %>% filter(bocc_status %in% c("Red","Amber"))
 
 ############################################################
-# 2) MAMMALS: Scotland EPS/protected/priority list for EcIA
+# 8. MAMMALS: Scotland EPS/protected/priority list for EcIA
 ############################################################
 
 mammals_imp <- tribble(
@@ -801,7 +853,7 @@ mammals_imp <- tribble(
 # )
 
 ############################################################
-# 3) BUILD LOOKUP (Birds Red/Amber only + Protected/priority mammals)
+# 9. BUILD LOOKUP (Birds Red/Amber only + Protected/priority mammals)
 ############################################################
 
 lookup_all <- bind_rows(
@@ -819,7 +871,7 @@ lookup_all <- bind_rows(
   distinct(common_name, scientific_name, .keep_all = TRUE)
 
 ############################################################
-# 4) NORMALISE OBSERVED NAMES; OPTIONAL SYNONYMS
+# 10. NORMALISE OBSERVED NAMES; OPTIONAL SYNONYMS
 ############################################################
 
 assoc <- assoc %>%
@@ -840,7 +892,7 @@ assoc <- assoc %>%
   select(-common_name_std)
 
 ############################################################
-# 5) FUZZY MATCH (COMMON and SCIENTIFIC), COMBINE, DEDUPE
+# 11. FUZZY MATCH (COMMON and SCIENTIFIC), COMBINE, DEDUPE
 ############################################################
 
 matched_common <- stringdist_inner_join(
@@ -871,7 +923,7 @@ matched_all <- bind_rows(matched_common, matched_sci) %>%
   )
 
 ############################################################
-# 6) FINAL IMPORTANT SPECIES OBJECT (Birds: Red/Amber; Mammals: EPS/Protected/SBL)
+# 12. FINAL IMPORTANT SPECIES OBJECT (Birds: Red/Amber; Mammals: EPS/Protected/SBL)
 ############################################################
 
 important_species_all <- matched_all %>%
@@ -893,7 +945,7 @@ important_species_all <- matched_all %>%
 
 
 ############################################################
-# 10. PLOTS
+# 13. IMPORTANT SPECIES PLOTS
 ############################################################
 # ==========================================================
 # EcIA-ready plots: richness, abundance, heatmap + 2 extras
@@ -902,14 +954,13 @@ important_species_all <- matched_all %>%
 #   status (Bird: Red/Amber; Mammal: EPS/Protected/SBL), order, family
 # ==========================================================
 
-library(tidyverse)
-library(scales)
-library(forcats)
+# Core libraries loaded at the top of the script; only patchwork is optional
+# for assembling multipanel figures.
 # install.packages("patchwork") # if needed
 library(patchwork)
 
 # ----------------------------
-# 0) General settings & helpers
+# 13.1 General settings & helpers
 # ----------------------------
 
 # Exclude out-of-boundary events if event_id encodes this
@@ -943,7 +994,7 @@ theme_ecia <- function(base_size = 11) {
 }
 
 # -------------------------------------------------
-# 1) Species richness by region and group (bar + %)
+# 13.2 Species richness by region and group (bar + %)
 # -------------------------------------------------
 
 richness <- dat %>%
@@ -970,7 +1021,7 @@ fig_richness
 
 
 
-# 2) Abundance by species (Cleveland bars; top-N)
+# 13.3 Abundance by species (Cleveland bars; top-N)
 # -------------------------------------------------
 top_n_per_group <- 10
 
@@ -1004,7 +1055,7 @@ fig_abundance
 
 
 # -------------------------------------------------
-# 3) Species–region heatmap (counts)
+# 13.4 Species–region heatmap (counts)
 # -------------------------------------------------
 
 # --- add species-level conservation category ---
@@ -1079,7 +1130,7 @@ fig_heatmap
 
 
 # -------------------------------------------------
-# 4) Bird BoCC composition (Red vs Amber) by region — STACKED COUNTS
+# 13.5 Bird BoCC composition (Red vs Amber) by region — STACKED COUNTS
 # -------------------------------------------------
 
 birds_comp_counts <- dat %>%
@@ -1112,7 +1163,7 @@ fig_bocc_comp_counts <- ggplot(birds_comp_counts, aes(region, n, fill = status))
   theme_ecia()
 fig_bocc_comp_counts
 # -------------------------------------------------
-# 5) Mammal protection category composition by region — STACKED COUNTS
+# 13.6 Mammal protection category composition by region — STACKED COUNTS
 # -------------------------------------------------
 
 mammals_comp_counts <- dat %>%
