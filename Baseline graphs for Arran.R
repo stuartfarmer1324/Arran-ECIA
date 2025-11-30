@@ -1,394 +1,1222 @@
+############################################################
+# ARRAN BIODIVERSITY ANALYSIS + IMPORTANT SPECIES PIPELINE
+# - Uses associatedoccurences.csv as sole data source
+# - Does genus→synthetic species imputation ONLY when species missing
+# - Produces:
+#   * All-taxa richness / divergence / rank–abundance etc.
+#   * Important species (BoCC birds + protected/priority mammals)
+############################################################
+#install.packages("ggbreak")
+# ---- Libraries ----
 library(tidyverse)
-library(janitor)
 library(stringr)
+library(fuzzyjoin)
+library(stringdist)
+library(forcats)
+library(scales)
+library(ggbreak)
 
-#----data formatting----
-# data in (edit your path or use file.choose())
+# library(patchwork) # uncomment if you want multipanel layouts
+
+############################################################
+# 1. LOAD ASSOCIATED OCCURRENCES (RAW)
+############################################################
+
 occurs_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/associatedoccurences.csv"
-# occurs_path <- file.choose()
 stopifnot(file.exists(occurs_path))
 
-# read + clean names
-oc <- readr::read_csv(occurs_path, show_col_types = FALSE) |>
-  clean_names()
+assoc <- readr::read_csv(occurs_path, show_col_types = FALSE)
 
-# helper: coalesce from whichever name columns exist
-coalesce_first <- function(df, candidates, new) {
-  hit <- intersect(names(df), candidates)
-  if (length(hit) == 0) {
-    df[[new]] <- NA_character_
-  } else {
-    df[[new]] <- df[[hit[1]]]
-    if (length(hit) > 1) for (i in hit[-1]) df[[new]] <- dplyr::coalesce(df[[new]], df[[i]])
-  }
-  df
-}
+# Check the original column names once (optional)
+# print(names(assoc))
 
-# species-like test (binomial names; excludes sp./spp./rank words)
+############################################################
+# 2. STANDARDISE CORE FIELDS
+############################################################
+# We assume the following columns exist in the CSV:
+#   eventID, Commonme, scientificme, kingdom, Order, taxonRank,
+#   occurrenceStatus, basisOfRecord
+# If names differ, adjust the rename() and mutate() blocks.
+
+assoc <- assoc %>%
+  rename(
+    event_id        = eventID,
+    common_name_raw = Commonme,
+    scientific_raw  = scientificme
+  ) %>%
+  mutate(
+    common_name_raw = str_squish(common_name_raw),
+    scientific_raw  = str_squish(scientific_raw),
+    common_name     = str_to_lower(common_name_raw),
+    scientific_name = str_to_lower(scientific_raw),
+    
+    kingdom           = str_to_sentence(str_squish(kingdom)),
+    taxonrank         = str_to_sentence(str_squish(taxonRank)),
+    order_name        = str_squish(Order),
+    occurrence_status = str_to_sentence(str_squish(occurrenceStatus)),
+    basis_of_record   = str_to_sentence(str_squish(basisOfRecord)),
+    
+    # Hillside / region (same thing, N vs S)
+    region = case_when(
+      str_starts(event_id, "N") ~ "North",
+      str_starts(event_id, "S") ~ "South",
+      TRUE ~ NA_character_
+    )
+  )
+
+############################################################
+# 3. GENUS→SYNTHETIC SPECIES IMPUTATION (ONLY WHEN SPECIES MISSING)
+############################################################
+
+# Helper: identify if scientific name looks like a proper binomial
 is_binomial <- function(x) {
   x <- str_trim(x)
   pat <- "^[A-Z][a-z]+\\s+[a-z][a-z\\-]+$"
   good <- str_detect(x, pat)
-  bad  <- str_detect(x, regex("\\b(sp|spp|species|order|family|genus)\\b", ignore_case = TRUE))
+  bad  <- str_detect(x, regex("\\b(sp|spp|species|cf|aff|indet|unknown)\\b", ignore_case = TRUE))
   good & !bad
 }
 
-# standardise fields we need
-if (!"taxonrank" %in% names(oc)) oc$taxonrank <- NA_character_
-oc <- oc |>
-  coalesce_first(c("scientificname","scientific_me","scientificme","scientific","taxon","verbatim_scientific_name"),
-                 "scientific_name") |>
-  coalesce_first(c("commonname","common_me","commonme","vernacular_name","common_name"),
-                 "common_name") |>
-  rename(order_name = any_of("order")) |>
+# Work with Title-case genus for imputation
+assoc <- assoc %>%
   mutate(
-    scientific_name    = scientific_name |> str_replace_all("_+", " ") |> str_squish(),
-    common_name        = common_name     |> str_replace_all("_+", " ") |> str_squish(),
-    occurrence_status  = str_to_sentence(str_squish(coalesce(occurrence_status, ""))),
-    taxonrank          = str_to_sentence(str_squish(coalesce(taxonrank, ""))),
-    kingdom            = str_to_sentence(str_squish(coalesce(kingdom, ""))),
-    order_name         = str_squish(coalesce(order_name, "")),
-    basis_of_record    = str_to_sentence(str_squish(coalesce(basis_of_record, ""))),
-    hillside           = case_when(
-      str_starts(tolower(event_id), "n") ~ "North",
-      str_starts(tolower(event_id), "s") ~ "South",
-      TRUE ~ NA_character_
+    sci_clean = case_when(
+      # If we already have something that looks like a binomial, capitalise nicely
+      !is.na(scientific_raw) & scientific_raw != "" &
+        is_binomial(str_to_title(scientific_raw)) ~ str_to_title(scientific_raw),
+      TRUE ~ str_to_title(scientific_raw)
     ),
-    species_flag = case_when(
-      !is.na(taxonrank) & tolower(taxonrank) == "species" ~ TRUE,
-      !is.na(scientific_name) & is_binomial(scientific_name) ~ TRUE,
-      TRUE ~ FALSE
+    genus      = word(sci_clean, 1),
+    epithet    = word(sci_clean, 2),
+    epithet_lc = tolower(coalesce(epithet, "")),
+    missing_epithet = is.na(epithet) |
+      epithet_lc == "" |
+      str_detect(epithet_lc, regex("^(sp|spp|sp\\.|spp\\.|cf\\.?|aff\\.?|indet\\.?|unknown)$",
+                                   ignore_case = TRUE)),
+    
+    # taxon_unit:
+    # - proper binomials → use Genus species (unchanged)
+    # - genus-only / sp. / spp. → assign one synthetic species per genus
+    taxon_unit = case_when(
+      !is.na(genus) & !missing_epithet ~ str_c(genus, " ", epithet),
+      !is.na(genus) & missing_epithet ~ str_c(genus, " species_", tolower(gsub("[^A-Za-z0-9]+", "", genus))),
+      TRUE ~ NA_character_
     )
   )
 
-# Pre-filter: keep only present and hillside known (don't drop on species yet,
-# because we'll keep invertebrates by order)
-oc0 <- oc |>
+# IMPORTANT: This does *not* overwrite real species, it only assigns synthetic
+# species for genus-only / “sp.” style records via taxon_unit.
+
+############################################################
+# 4. FILTER FOR ANALYSIS (PRESENT + KNOWN REGION)
+############################################################
+
+assoc_use <- assoc %>%
   filter(
     occurrence_status == "Present",
-    !is.na(hillside)
+    !is.na(region)
   )
 
-# lightweight group mapping (rule-based; prioritised top->bottom)
-mammal_orders <- c("artiodactyla","carnivora","rodentia","lagomorpha","eulipotyphla","chiroptera")  # bats handled earlier
-aquatic_orders <- c("trichoptera","ephemeroptera","plecoptera","odonata","anisoptera","zygoptera")
-terrestrial_orders <- c("lepidoptera","diptera","coleoptera","araneae","hymenoptera","hemiptera","thysanoptera","ixodida","julida","tipulidae","tipuloidea","homoptera")
+############################################################
+# 5. GROUP ASSIGNMENT (Birds, Bats, Mammals, Plants, Inverts, Other)
+############################################################
 
-# birds by event_id pattern (N1B, S2B, NB_I, SB_I, N3B_OoB, etc.)
+mammal_orders      <- c("artiodactyla", "carnivora", "rodentia",
+                        "lagomorpha", "eulipotyphla", "chiroptera")
+aquatic_orders     <- c("trichoptera","ephemeroptera","plecoptera",
+                        "odonata","anisoptera","zygoptera")
+terrestrial_orders <- c("lepidoptera","diptera","coleoptera","araneae",
+                        "hymenoptera","hemiptera","thysanoptera","ixodida",
+                        "julida","tipulidae","tipuloidea","homoptera")
+
+# Birds by event pattern (N1B, S2B, NB_I, etc.)
 bird_event_pat <- regex("^[NS](\\d+B(\\b|_)|B_)", ignore_case = TRUE)
 
-# Assign groups (uses order names, event clues, etc.)
-oc0 <- oc0 |>
+assoc_use <- assoc_use %>%
   mutate(
     oname_lc = tolower(order_name),
     cname_lc = tolower(coalesce(common_name, "")),
     sname_lc = tolower(coalesce(scientific_name, "")),
-    bid = tolower(coalesce(basis_of_record, "")),
-    evid = tolower(coalesce(event_id, "")),
+    bid      = tolower(coalesce(basis_of_record, "")),
+    evid     = tolower(coalesce(event_id, "")),
+    
     group = case_when(
-      # plants
+      # Plants
       kingdom == "Plantae" | str_detect(evid, "^[ns]\\d?p") ~ "Plants",
-      # bats
-      str_detect(oname_lc, "chiroptera") | str_detect(evid, "cr") | str_detect(bid, "audiomoth") ~ "Bats",
-      # birds (use event IDs; taxonomic order often missing/messy)
+      
+      # Bats (by order, event code CR, or audiomoth)
+      str_detect(oname_lc, "chiroptera") |
+        str_detect(evid, "cr") |
+        str_detect(bid, "audiomoth") ~ "Bats",
+      
+      # Birds (by event IDs)
       str_detect(evid, bird_event_pat) ~ "Birds",
-      # aquatic inverts (orders + clear keywords + freshwater event IDs like *FI*)
+      
+      # Aquatic invertebrates
       str_detect(evid, "fi") |
         str_detect(oname_lc, str_c(aquatic_orders, collapse = "|")) |
-        str_detect(cname_lc, "caddis|mayfly|stonefly|dragonfly|damselfly|boatman|diving beetle|dytisc|corix") ~ "Aquatic invertebrates",
-      # mammals (non-bat)
+        str_detect(cname_lc,
+                   "caddis|mayfly|stonefly|dragonfly|damselfly|boatman|diving beetle|dytisc|corix") ~
+        "Aquatic invertebrates",
+      
+      # Mammals (non-bats)
       str_detect(oname_lc, str_c(setdiff(mammal_orders, "chiroptera"), collapse = "|")) ~ "Mammals",
-      # terrestrial inverts (orders + terrestrial sampling IDs)
+      
+      # Terrestrial invertebrates
       str_detect(oname_lc, str_c(terrestrial_orders, collapse = "|")) |
         str_detect(evid, "tin|tip|tit") ~ "Terrestrial invertebrates",
+      
       TRUE ~ "Other"
-    )
+    ),
+    
+    hillside = region  # alias, to match your original plotting terminology
   )
 
-# Keep species-level for non-invertebrates; keep order-level for invertebrates
-invert_groups <- c("Terrestrial invertebrates","Aquatic invertebrates")
-
-species_ok <- oc0 |>
-  mutate(species_ok = species_flag &
-           !is.na(scientific_name) &
-           scientific_name != "" &
-           !str_detect(scientific_name, regex("^no records|unidentified", ignore_case = TRUE))) |>
-  pull(species_ok)
-
-order_ok <- oc0$order_name != "" & !is.na(oc0$order_name)
-
-oc_use <- oc0 |>
-  mutate(species_ok = species_ok,
-         order_ok   = order_ok) |>
+# Only keep rows with usable taxon_unit
+oc_use <- assoc_use %>%
   filter(
-    # For invertebrates, require order; for others, require species
-    (group %in% invert_groups & order_ok) |
-      (!(group %in% invert_groups) & species_ok)
-  ) |>
-  # Define the analysis unit: orders for inverts, species for others
-  mutate(
-    taxon_unit = case_when(
-      group %in% invert_groups ~ str_squish(order_name),
-      TRUE ~ scientific_name
-    )
+    !is.na(taxon_unit),
+    taxon_unit != "",
+    !str_detect(taxon_unit, regex("^No records|Unidentified", ignore_case = TRUE))
   )
 
-#---- richness (distinct unit per hillside) ----
-rich_by_group <- oc_use |>
-  group_by(group, hillside) |>
-  summarise(n_species = n_distinct(taxon_unit), .groups = "drop")  # counts orders for inverts, species otherwise
+############################################################
+# 6. ALL-TAXA RICHNESS / ABUNDANCE / JACCARD PLOTS
+############################################################
 
-# overall richness (overall still counts by analysis unit)
-rich_overall <- oc_use |>
-  group_by(hillside) |>
-  summarise(n_species = n_distinct(taxon_unit), .groups = "drop") |>
+group_levels <- c("Overall","Plants","Birds","Mammals","Bats",
+                  "Terrestrial invertebrates","Aquatic invertebrates")
+
+# ---- 6.1 Richness by group (+ overall), North vs South ----
+rich_by_group <- oc_use %>%
+  group_by(group, hillside) %>%
+  summarise(n_species = n_distinct(taxon_unit), .groups = "drop")
+
+rich_overall <- oc_use %>%
+  group_by(hillside) %>%
+  summarise(n_species = n_distinct(taxon_unit), .groups = "drop") %>%
   mutate(group = "Overall")
 
-plot_dat <- bind_rows(rich_by_group, rich_overall) |>
-  filter(group %in% c("Birds","Bats","Mammals","Terrestrial invertebrates","Aquatic invertebrates","Plants","Overall"))
-
-# order groups for plotting
-group_levels <- c("Overall","Plants","Birds","Mammals","Bats","Terrestrial invertebrates","Aquatic invertebrates")
-plot_dat <- plot_dat |>
+plot_dat <- bind_rows(rich_by_group, rich_overall) %>%
+  filter(group %in% group_levels) %>%
   mutate(
-    group = factor(group, levels = group_levels),
+    group    = factor(group, levels = group_levels),
     hillside = factor(hillside, levels = c("North","South"))
-  ) |>
+  ) %>%
   arrange(group, hillside)
 
-#---- single figure: richness by group (+ overall), North vs South ---- 
-p <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
+p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
   geom_col(position = position_dodge(width = 0.75), width = 0.7, colour = "white") +
   geom_text(aes(label = n_species),
             position = position_dodge(width = 0.75),
             hjust = -0.2, size = 3.8, colour = "grey20") +
   scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
   labs(
-    title = "Richness by sampled group and hillside",
-    subtitle = "Distinct units per hillside (species for vertebrates/plants; orders for invertebrates)",
-    x = "Richness (distinct analysis units)",
+    title    = "Richness by sampled group and hillside",
+    subtitle = "Distinct species per hillside (genus-only records imputed to synthetic species)",
+    x = "Richness (species)",
     y = NULL,
     fill = NULL
   ) +
   theme_minimal(base_size = 12) +
   theme(
-    legend.position = "top",
-    panel.grid.major.y = element_blank()
+    legend.position       = "top",
+    panel.grid.major.y    = element_blank()
   )
 
-p 
+p_rich_all
 
-#---- Diverging richness plot (by analysis unit) ----
-
-rich_by_group <- oc_use |>
-  dplyr::group_by(group, hillside) |>
-  dplyr::summarise(n_species = dplyr::n_distinct(taxon_unit), .groups = "drop")
-
-rich_overall <- oc_use |>
-  dplyr::group_by(hillside) |>
-  dplyr::summarise(n_species = dplyr::n_distinct(taxon_unit), .groups = "drop") |>
-  dplyr::mutate(group = "Overall")
-
-groups_to_show <- c("Overall","Plants","Birds","Mammals","Bats","Terrestrial invertebrates","Aquatic invertebrates")
-summ <- dplyr::bind_rows(rich_by_group, rich_overall) |>
-  dplyr::filter(group %in% groups_to_show) |>
-  tidyr::pivot_wider(names_from = hillside, values_from = n_species, values_fill = 0) |>
-  dplyr::mutate(
-    diff   = coalesce(South, 0) - coalesce(North, 0),           
-    winner = dplyr::case_when(diff > 0 ~ "South", diff < 0 ~ "North", TRUE ~ "Tie"),
-    group  = forcats::fct_reorder(group, abs(diff), .desc = TRUE)
+# ---- 6.2 Diverging richness plot (South − North) by group ----
+df_div <- summ_diff %>%
+  mutate(
+    diff = South - North,
+    abs_diff = abs(diff),
+    direction = ifelse(diff > 0, "South",
+                       ifelse(diff < 0, "North", "Tie")),
+    # first reorder normally by diff…
+    group = fct_reorder(group, diff),
+    # …then force "Overall" to the bottom
+    group = fct_relevel(group, "Overall", after = Inf)
   )
 
-lim <- max(abs(summ$diff), na.rm = TRUE)
-lims <- c(-lim * 1.15, lim * 1.15)
-offset <- max(0.4, lim * 0.03)  
 
-p_diverge <- ggplot(summ, aes(x = diff, y = group, fill = winner)) +
-  geom_vline(xintercept = 0, linetype = 3, colour = "grey65") +
-  geom_col(width = 0.7, colour = "white") +
-  geom_text(aes(x = pmin(diff, 0) - offset, label = paste0("N=", coalesce(North, 0))),
-            hjust = 1, size = 3.6, colour = "grey20") +
-  geom_text(aes(x = pmax(diff, 0) + offset, label = paste0("S=", coalesce(South, 0))),
-            hjust = 0, size = 3.6, colour = "grey20") +
-  scale_fill_manual(values = c("North" = "#1f78b4", "South" = "#33a02c", "Tie" = "grey70")) +
-  scale_x_continuous(limits = lims, breaks = scales::pretty_breaks()) +
-  labs(
-    title = "Richness (diverging) by sampled group",
-    subtitle = "Species for vertebrates/plants; orders for invertebrates. South − North.",
-    x = "South − North (units)", y = NULL, fill = NULL
+# ensure ±6 appear on axis
+auto_breaks <- scales::pretty_breaks(5)(range(df_div$diff))
+forced_breaks <- sort(unique(c(auto_breaks, -6, 6)))
+
+
+p_diverge_final <- ggplot(df_div, aes(y = group)) +
+  
+  # centre line
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  
+  # diverging bars (diff gives direction)
+  geom_col(aes(x = diff, fill = direction),
+           width = 0.65, colour = "white") +
+  
+  # --- LEFT LABELS (North values) ---
+  geom_text(
+    data = df_div %>% filter(diff < 0),
+    aes(x = diff - 0.25, label = paste0("N = ", North)),
+    hjust = 1, size = 3.6, colour = "grey20"
   ) +
-  theme_minimal(base_size = 12) +
+  
+  # --- RIGHT LABELS (South values) ---
+  geom_text(
+    data = df_div %>% filter(diff > 0),
+    aes(x = diff + 0.25, label = paste0("S = ", South)),
+    hjust = 0, size = 3.6, colour = "grey20"
+  ) +
+  
+  # --- CENTRE VALUES (the opposite slope) ---
+  # North bar => show South at centre
+  geom_text(
+    data = df_div %>% filter(diff < 0),
+    aes(x = 0.1, label = paste0("S = ", South)),
+    hjust = 0, size = 3.4, colour = "grey40"
+  ) +
+  # South bar => show North at centre
+  geom_text(
+    data = df_div %>% filter(diff > 0),
+    aes(x = -0.1, label = paste0("N = ", North)),
+    hjust = 1, size = 3.4, colour = "grey40"
+  ) +
+  
+  scale_fill_manual(values = c(
+    "North" = "#74A9CF",
+    "South" = "#A1D99B",
+    "Tie"   = "grey80"
+  )) +
+  
+  # ⭐ POSITIVE AXIS BOTH SIDES (ABS VALUES SHOWN)
+  scale_x_continuous(
+    labels = abs,          # <- KEY: shows |value| instead of signed value
+    breaks = forced_breaks,
+    expand = expansion(mult = c(0.12, 0.12))
+  ) +
+  
+  labs(
+    title = "Richness difference between candidate sites(North - South)",
+    x = "Difference",
+    y = "Group",
+    fill = ""
+  ) +
+  
+  theme_minimal(base_size = 14) +
   theme(
     legend.position = "top",
-    panel.grid.major.y = element_blank()
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11, colour = "grey25"),
+    
+    axis.line.x = element_line(colour = "grey40", linewidth = 0.6),
+    axis.ticks.x = element_line(colour = "grey40"),
+    axis.line.y = element_line(colour = "grey40", linewidth = 0.6),
+    axis.ticks.y = element_line(colour = "grey40")
   )
 
-p_diverge  
+p_diverge_final
 
-#---- abundance (by analysis unit) ----
-rank_abund <- oc_use |>
-  count(hillside, taxon_unit, name = "records") |>
-  group_by(hillside) |>
-  arrange(desc(records), .by_group = TRUE) |>
-  mutate(rank = row_number()) |>
+
+
+# ---- 6.3 Rank–abundance across all species, per hillside ----
+rank_abund_all <- oc_use %>%
+  count(hillside, taxon_unit, name = "records") %>%
+  group_by(hillside) %>%
+  arrange(desc(records), .by_group = TRUE) %>%
+  mutate(rank = row_number()) %>%
   ungroup()
 
-ggplot(rank_abund, aes(x = rank, y = records, colour = hillside)) +
-  geom_line() + geom_point(size = 1.5) +
+p_rank_all <- ggplot(rank_abund_all, aes(x = rank, y = records, colour = hillside)) +
+  geom_line() +
+  geom_point(size = 1.5) +
   scale_y_log10() +
-  labs(title = "Rank–abundance (by record frequency)",
-       subtitle = "Species for vertebrates/plants; orders for invertebrates",
-       x = "Unit rank (per hillside)", y = "Records (log scale)", colour = NULL) +
+  labs(
+    title    = "Rank–abundance (by record frequency)",
+    subtitle = "Species-level (genus-only records imputed)",
+    x        = "Species rank (per hillside)",
+    y        = "Records (log scale)",
+    colour   = NULL
+  ) +
   theme_minimal(base_size = 12) +
   theme(legend.position = "top")
 
-#---- simple turnover (Jaccard) by analysis unit ----
-jaccard_by_group <- oc_use |>
-  distinct(group, hillside, taxon_unit) |>
-  group_by(group) |>
+p_rank_all
+
+# ---- 6.4 Similarity (Jaccard) between hillsides by group ----
+jaccard_by_group <- oc_use %>%
+  distinct(group, hillside, taxon_unit) %>%
+  group_by(group) %>%
   summarise(
-    north = n_distinct(taxon_unit[hillside == "North"]),
-    south = n_distinct(taxon_unit[hillside == "South"]),
+    north  = n_distinct(taxon_unit[hillside == "North"]),
+    south  = n_distinct(taxon_unit[hillside == "South"]),
     shared = n_distinct(intersect(
       taxon_unit[hillside == "North"],
       taxon_unit[hillside == "South"]
     )),
-    jaccard = ifelse(north + south - shared == 0, NA_real_, shared / (north + south - shared)),
+    jaccard = if_else(north + south - shared == 0,
+                      NA_real_, shared / (north + south - shared)),
     .groups = "drop"
-  ) |>
+  ) %>%
   filter(group %in% group_levels)
 
-ggplot(jaccard_by_group, aes(x = jaccard, y = factor(group, levels = rev(group_levels)))) +
+p_jaccard_all <- ggplot(jaccard_by_group,
+                        aes(x = jaccard,
+                            y = factor(group, levels = rev(group_levels)))) +
   geom_vline(xintercept = 0.5, linetype = 3, colour = "grey70") +
   geom_point(size = 3, colour = "#2c7fb8") +
-  scale_x_continuous(limits = c(0,1), labels = scales::percent_format(accuracy = 1)) +
-  labs(title = "Similarity between hillsides by group",
-       subtitle = "Jaccard index over analysis units (species for vertebrates/plants; orders for invertebrates)",
-       x = "Similarity", y = NULL) +
+  scale_x_continuous(limits = c(0,1), labels = percent_format(accuracy = 1)) +
+  labs(
+    title    = "Similarity between hillsides by group",
+    subtitle = "Jaccard index over species (genus-only records imputed)",
+    x        = "Similarity",
+    y        = NULL
+  ) +
   theme_minimal(base_size = 12)
 
-# ---- Two plots (richness and rank–abundance) per group, using analysis units ----
+p_jaccard_all
 
-make_group_plots <- function(df, grp_label) {
-  df_grp <- df |> dplyr::filter(group == grp_label)
+# ---- 6.5 Per-group abundance plots (optional helpers) ----
+grouped_species_abundance <- function(df, grp_label, top_n = Inf) {
+  df_grp <- df %>% filter(group == grp_label)
   if (nrow(df_grp) == 0) return(invisible(NULL))
   
-  unit_label <- if (grp_label %in% c("Terrestrial invertebrates","Aquatic invertebrates")) "orders" else "species"
+  dat0 <- df_grp %>%
+    count(hillside, taxon_unit, name = "records")
   
-  # Richness per hillside (distinct analysis units)
-  rich <- df_grp |>
-    dplyr::distinct(hillside, taxon_unit) |>
-    dplyr::count(hillside, name = "n_units")
+  dat <- dat0 %>%
+    tidyr::complete(taxon_unit, hillside = c("North","South"),
+                    fill = list(records = 0)) %>%
+    mutate(hillside = factor(hillside, levels = c("North","South")))
   
-  p_rich <- ggplot2::ggplot(rich, ggplot2::aes(x = hillside, y = n_units, fill = hillside)) +
-    ggplot2::geom_col(width = 0.7, colour = "white") +
-    ggplot2::geom_text(ggplot2::aes(label = n_units), vjust = -0.3, size = 4) +
-    ggplot2::labs(
-      title = paste0(grp_label, " — richness by hillside (", unit_label, ")"),
-      x = NULL, y = paste("Richness (", unit_label, ")", sep = "")
-    ) +
-    ggplot2::theme_minimal(base_size = 12) +
-    ggplot2::theme(legend.position = "none")
-  print(p_rich)
+  totals <- dat %>%
+    group_by(taxon_unit) %>%
+    summarise(total_records = sum(records), .groups = "drop")
   
-  # Rank–abundance (by record frequency) per hillside
-  rank_abund <- df_grp |>
-    dplyr::count(hillside, taxon_unit, name = "records") |>
-    dplyr::group_by(hillside) |>
-    dplyr::arrange(dplyr::desc(records), .by_group = TRUE) |>
-    dplyr::mutate(rank = dplyr::row_number()) |>
-    dplyr::ungroup()
-  
-  if (nrow(rank_abund) == 0) return(invisible(NULL))
-  
-  p_abund <- ggplot2::ggplot(rank_abund, ggplot2::aes(x = rank, y = records, colour = hillside)) +
-    ggplot2::geom_line() +
-    ggplot2::geom_point(size = 1.8) +
-    ggplot2::scale_y_log10() +
-    ggplot2::labs(
-      title = paste0(grp_label, " — rank–abundance (", unit_label, ")"),
-      x = paste("Unit rank (", unit_label, ")", sep = ""),
-      y = "Records (log scale)",
-      colour = NULL
-    ) +
-    ggplot2::theme_minimal(base_size = 12) +
-    ggplot2::theme(legend.position = "top")
-  print(p_abund)
-}
-
-# Order requested: Birds first, then invertebrates etc.
-groups_to_plot <- c("Birds", "Terrestrial invertebrates", "Aquatic invertebrates", "Mammals", "Bats", "Plants")
-groups_to_plot <- groups_to_plot[groups_to_plot %in% unique(oc_use$group)]
-for (g in groups_to_plot) {
-  make_group_plots(oc_use, g)
-}
-
-# ---- Individual unit abundance per group (North vs South) ----
-make_species_abundance <- function(df, grp_label, top_n = Inf) {
-  df_grp <- df |> dplyr::filter(group == grp_label)
-  if (nrow(df_grp) == 0) return(invisible(NULL))
-  
-  unit_label <- if (grp_label %in% c("Terrestrial invertebrates","Aquatic invertebrates")) "orders" else "species"
-  
-  # Count records per unit x hillside and ensure both hillsides appear per unit (fill missing with 0)
-  dat0 <- df_grp |>
-    dplyr::count(hillside, taxon_unit, name = "records")
-  
-  dat <- dat0 |>
-    tidyr::complete(taxon_unit, hillside = c("North","South"), fill = list(records = 0)) |>
-    dplyr::mutate(hillside = factor(hillside, levels = c("North","South")))
-  
-  # Order units by total records (across both hillsides)
-  totals <- dat |>
-    dplyr::group_by(taxon_unit) |>
-    dplyr::summarise(total_records = sum(records), .groups = "drop")
-  
-  dat <- dat |>
-    dplyr::left_join(totals, by = "taxon_unit")
+  dat <- dat %>% left_join(totals, by = "taxon_unit")
   
   if (is.finite(top_n)) {
-    keep <- totals |>
-      dplyr::arrange(dplyr::desc(total_records)) |>
-      dplyr::slice_head(n = top_n) |>
-      dplyr::pull(taxon_unit)
-    dat <- dat |>
-      dplyr::filter(taxon_unit %in% keep)
+    keep <- totals %>%
+      arrange(desc(total_records)) %>%
+      slice_head(n = top_n) %>%
+      pull(taxon_unit)
+    dat <- dat %>% filter(taxon_unit %in% keep)
   }
   
-  dat <- dat |>
-    dplyr::mutate(taxon_unit = reorder(taxon_unit, total_records))
+  dat <- dat %>%
+    mutate(taxon_unit = reorder(taxon_unit, total_records))
   
-  p <- ggplot2::ggplot(dat, ggplot2::aes(x = taxon_unit, y = records, fill = hillside)) +
-    ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.75), width = 0.7, colour = "white") +
-    ggplot2::geom_text(ggplot2::aes(label = records),
-                       position = ggplot2::position_dodge(width = 0.75),
-                       hjust = -0.1, size = 3, colour = "grey25") +
-    ggplot2::coord_flip(clip = "off") +
-    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0, 0.1))) +
-    ggplot2::labs(
-      title = paste0(grp_label, " — records by hillside (", unit_label, ")"),
-      x = NULL, y = "Record count", fill = NULL
+  ggplot(dat, aes(x = taxon_unit, y = records, fill = hillside)) +
+    geom_col(position = position_dodge(width = 0.75),
+             width = 0.7, colour = "white") +
+    geom_text(aes(label = records),
+              position = position_dodge(width = 0.75),
+              hjust = -0.1, size = 3, colour = "grey25") +
+    coord_flip(clip = "off") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(
+      title = paste0(grp_label, " — records by hillside (species)"),
+      x     = NULL,
+      y     = "Record count",
+      fill  = NULL
     ) +
-    ggplot2::theme_minimal(base_size = 12) +
-    ggplot2::theme(legend.position = "top")
-  print(p)
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "top")
 }
 
-# Requested order: Birds first, then Mammals, Bats, Terrestrial inverts, Aquatic inverts, Plants
-groups_to_plot <- c("Birds", "Mammals", "Bats", "Terrestrial invertebrates", "Aquatic invertebrates", "Plants")
-groups_to_plot <- groups_to_plot[groups_to_plot %in% unique(oc_use$group)]
+grouped_species_abundance
+# Example call per group (comment/uncomment as needed)
+# for (g in c("Birds","Mammals","Bats","Terrestrial invertebrates","Aquatic invertebrates","Plants")) {
+#   if (g %in% unique(oc_use$group)) print(make_species_abundance(oc_use, g))
+# }
 
-for (g in groups_to_plot) {
-  make_species_abundance(oc_use, g)          # all units
-  # make_species_abundance(oc_use, g, top_n = 25)  # uncomment to show top 25 per group
+############################################################
+# 1) BIRDS: YOUR SOURCE TABLES (as provided), THEN WE FIX MISLABELS
+############################################################
+
+bocc5_part1 <- tribble(
+  ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
+  
+  # RED LIST
+  "house sparrow", "passer domesticus", "Red", "Passeriformes", "Passeridae",
+  "tree sparrow", "passer montanus", "Red", "Passeriformes", "Passeridae",
+  "skylark", "alauda arvensis", "Red", "Passeriformes", "Alaudidae",
+  "yellow wagtail", "motacilla flava", "Red", "Passeriformes", "Motacillidae",
+  "starling", "sturnus vulgaris", "Red", "Passeriformes", "Sturnidae",
+  "mistle thrush", "turdus viscivorus", "Red", "Passeriformes", "Turdidae",
+  "song thrush", "turdus philomelos", "Red", "Passeriformes", "Turdidae",
+  "fieldfare", "turdus pilaris", "Red", "Passeriformes", "Turdidae",
+  "redwing", "turdus iliacus", "Red", "Passeriformes", "Turdidae",
+  "spotted flycatcher", "muscicapa striata", "Red", "Passeriformes", "Muscicapidae",
+  "pied flycatcher", "ficedula hypoleuca", "Red", "Passeriformes", "Muscicapidae",
+  "wood warbler", "phylloscopus sibilatrix", "Red", "Passeriformes", "Phylloscopidae",
+  "willow tit", "poecile montanus", "Red", "Passeriformes", "Paridae",
+  "marsh tit", "poecile palustris", "Red", "Passeriformes", "Paridae",
+  "corn bunting", "emberiza calandra", "Red", "Passeriformes", "Emberizidae",
+  "yellowhammer", "emberiza citrinella", "Red", "Passeriformes", "Emberizidae",
+  "cuckoo", "cuculus canorus", "Red", "Cuculiformes", "Cuculidae",
+  "swift", "apus apus", "Red", "Apodiformes", "Apodidae",
+  "kestrel", "falco tinnunculus", "Red", "Falconiformes", "Falconidae",
+  "merlin", "falco columbarius", "Red", "Falconiformes", "Falconidae",
+  "peregrine", "falco peregrinus", "Red", "Falconiformes", "Falconidae",
+  "hen harrier", "circus cyaneus", "Red", "Accipitriformes", "Accipitridae",
+  "golden eagle", "aquila chrysaetos", "Red", "Accipitriformes", "Accipitridae",
+  "osprey", "pandion haliaetus", "Red", "Accipitriformes", "Pandionidae",
+  
+  # AMBER LIST BEGIN
+  "meadow pipit", "anthus pratensis", "Amber", "Passeriformes", "Motacillidae",
+  "rock pipit", "anthus petrosus", "Amber", "Passeriformes", "Motacillidae",
+  "grey wagtail", "motacilla cinerea", "Amber", "Passeriformes", "Motacillidae",
+  "robin", "erithacus rubecula", "Amber", "Passeriformes", "Muscicapidae",
+  "dunnock", "prunella modularis", "Amber", "Passeriformes", "Prunellidae",
+  "blackbird", "turdus merula", "Amber", "Passeriformes", "Turdidae",
+  "ring ouzel", "turdus torquatus", "Amber", "Passeriformes", "Turdidae",
+  "whinchat", "saxicola rubetra", "Amber", "Passeriformes", "Muscicapidae",
+  "stonechat", "saxicola rubicola", "Amber", "Passeriformes", "Muscicapidae",
+  "wheatear", "oenanthe oenanthe", "Amber", "Passeriformes", "Muscicapidae",
+  "long-tailed tit", "aegithalos caudatus", "Amber", "Passeriformes", "Aegithalidae",
+  "great tit", "parus major", "Amber", "Passeriformes", "Paridae",
+  "blue tit", "cyanistes caeruleus", "Amber", "Passeriformes", "Paridae",
+  "coal tit", "periparus ater", "Amber", "Passeriformes", "Paridae",
+  "goldcrest", "regulus regulus", "Amber", "Passeriformes", "Regulidae",
+  "firecrest", "regulus ignicapilla", "Amber", "Passeriformes", "Regulidae",
+  "bullfinch", "pyrrhula pyrrhula", "Amber", "Passeriformes", "Fringillidae",
+  "linnet", "linaria cannabina", "Amber", "Passeriformes", "Fringillidae",
+  "lesser redpoll", "carduelis cabaret", "Amber", "Passeriformes", "Fringillidae",
+  "siskin", "spinus spinus", "Amber", "Passeriformes", "Fringillidae",
+  "goldfinch", "carduelis carduelis", "Amber", "Passeriformes", "Fringillidae",
+  "greenfinch", "chloris chloris", "Amber", "Passeriformes", "Fringillidae",
+  "chaffinch", "fringilla coelebs", "Amber", "Passeriformes", "Fringillidae",
+  "brambling", "fringilla montifringilla", "Amber", "Passeriformes", "Fringillidae",
+  
+  # Continue Amber species
+  "jackdaw", "corvus monedula", "Amber", "Passeriformes", "Corvidae",
+  "rook", "corvus frugilegus", "Amber", "Passeriformes", "Corvidae",
+  "carrion crow", "corvus corone", "Amber", "Passeriformes", "Corvidae",
+  "raven", "corvus corax", "Amber", "Passeriformes", "Corvidae",
+  "magpie", "pica pica", "Amber", "Passeriformes", "Corvidae",
+  "jay", "garrulus glandarius", "Amber", "Passeriformes", "Corvidae",
+  
+  # Continue…
+  "wood pigeon", "columba palumbus", "Amber", "Columbiformes", "Columbidae",
+  "stock dove", "columba oenas", "Amber", "Columbiformes", "Columbidae",
+  "collared dove", "streptopelia decaocto", "Amber", "Columbiformes", "Columbidae",
+  
+  # WADERS
+  "lapwing", "vanellus vanellus", "Amber", "Charadriiformes", "Charadriidae",
+  "oystercatcher", "haematopus ostralegus", "Amber", "Charadriiformes", "Haematopodidae",
+  "curlew", "numenius arquata", "Amber", "Charadriiformes", "Scolopacidae",
+  "snipe", "gallinago gallinago", "Amber", "Charadriiformes", "Scolopacidae",
+  "woodcock", "scolopax rusticola", "Amber", "Charadriiformes", "Scolopacidae",
+  
+  # GULLS
+  "herring gull", "larus argentatus", "Amber", "Charadriiformes", "Laridae",
+  "kittiwake", "rissa tridactyla", "Amber", "Charadriiformes", "Laridae",
+  "common gull", "larus canus", "Amber", "Charadriiformes", "Laridae"
+)
+
+bocc5_part2 <- tribble(
+  ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
+  
+  # Continue Amber-listed WADERS & GULLS
+  "black-headed gull", "chroicocephalus ridibundus", "Amber", "Charadriiformes", "Laridae",
+  "lesser black-backed gull", "larus fuscus", "Amber", "Charadriiformes", "Laridae",
+  "great black-backed gull", "larus marinus", "Amber", "Charadriiformes", "Laridae",
+  "sandwich tern", "thalasseus sandvicensis", "Amber", "Charadriiformes", "Laridae",
+  "common tern", "sterna hirundo", "Amber", "Charadriiformes", "Laridae",
+  "arctic tern", "sterna paradisaea", "Amber", "Charadriiformes", "Laridae",
+  
+  # WATERFOWL
+  "mallard", "anas platyrhynchos", "Amber", "Anseriformes", "Anatidae",
+  "teal", "anas crecca", "Amber", "Anseriformes", "Anatidae",
+  "wigeon", "mareca penelope", "Amber", "Anseriformes", "Anatidae",
+  "pintail", "anas acuta", "Amber", "Anseriformes", "Anatidae",
+  "shoveler", "spatula clypeata", "Amber", "Anseriformes", "Anatidae",
+  "pochard", "aythya ferina", "Amber", "Anseriformes", "Anatidae",
+  "tufted duck", "aythya fuligula", "Amber", "Anseriformes", "Anatidae",
+  "goldeneye", "bucephala clangula", "Amber", "Anseriformes", "Anatidae",
+  "goosander", "mergus merganser", "Amber", "Anseriformes", "Anatidae",
+  
+  # GEESE
+  "pink-footed goose", "anser brachyrhynchus", "Amber", "Anseriformes", "Anatidae",
+  "greylag goose", "anser anser", "Amber", "Anseriformes", "Anatidae",
+  "canada goose", "branta canadensis", "Amber", "Anseriformes", "Anatidae",
+  "barnacle goose", "branta leucopsis", "Amber", "Anseriformes", "Anatidae",
+  
+  # RAPTORS continued
+  "buzzard", "buteo buteo", "Amber", "Accipitriformes", "Accipitridae",
+  "red kite", "milvus milvus", "Amber", "Accipitriformes", "Accipitridae",
+  
+  # OWLS
+  "tawny owl", "strix aluco", "Amber", "Strigiformes", "Strigidae",
+  "barn owl", "tyto alba", "Amber", "Strigiformes", "Tytonidae",
+  "long-eared owl", "asio otus", "Amber", "Strigiformes", "Strigidae",
+  "short-eared owl", "asio flammeus", "Amber", "Strigiformes", "Strigidae",
+  
+  # WRENS
+  "wren", "troglodytes troglodytes", "Amber", "Passeriformes", "Troglodytidae",
+  
+  # WOODPECKERS
+  "great spotted woodpecker", "dendrocopos major", "Amber", "Piciformes", "Picidae",
+  "green woodpecker", "picus viridis", "Amber", "Piciformes", "Picidae",
+  "lesser spotted woodpecker", "dryobates minor", "Amber", "Piciformes", "Picidae",
+  
+  # GAMEBIRDS
+  "red grouse", "lagopus lagopus scotica", "Amber", "Galliformes", "Phasianidae",
+  "pheasant", "phasianus colchicus", "Amber", "Galliformes", "Phasianidae",
+  "grey partridge", "perdix perdix", "Amber", "Galliformes", "Phasianidae",
+  
+  # HERONS / EGRETS
+  "grey heron", "ardea cinerea", "Amber", "Pelecaniformes", "Ardeidae",
+  "little egret", "egretta garzetta", "Amber", "Pelecaniformes", "Ardeidae",
+  
+  # GREBES
+  "great crested grebe", "podiceps cristatus", "Amber", "Podicipediformes", "Podicipedidae",
+  "little grebe", "tachybaptus ruficollis", "Amber", "Podicipediformes", "Podicipedidae",
+  
+  # SWIFTS & SWALLOWS
+  "swallow", "hirundo rustica", "Amber", "Passeriformes", "Hirundinidae",
+  "house martin", "delichon urbicum", "Amber", "Passeriformes", "Hirundinidae",
+  "sand martin", "riparia riparia", "Amber", "Passeriformes", "Hirundinidae",
+  
+  # WARBLERS
+  "chiffchaff", "phylloscopus collybita", "Amber", "Passeriformes", "Phylloscopidae",
+  "willow warbler", "phylloscopus trochilus", "Amber", "Passeriformes", "Phylloscopidae",
+  "blackcap", "sylvia atricapilla", "Amber", "Passeriformes", "Sylviidae",
+  "garden warbler", "sylvia borin", "Amber", "Passeriformes", "Sylviidae",
+  "whitethroat", "sylvia communis", "Amber", "Passeriformes", "Sylviidae",
+  "lesser whitethroat", "curruca curruca", "Amber", "Passeriformes", "Sylviidae",
+  
+  # TREECREEPERS
+  "treecreeper", "certhia familiaris", "Amber", "Passeriformes", "Certhiidae",
+  
+  # KINGFISHER
+  "kingfisher", "alcedo atthis", "Amber", "Coraciiformes", "Alcedinidae",
+  
+  # DIPPER
+  "dipper", "cinclus cinclus", "Amber", "Passeriformes", "Cinclidae",
+  
+  # GREEN LIST (common species)
+  "robin", "erithacus rubecula", "Green", "Passeriformes", "Muscicapidae",
+  "blue tit", "cyanistes caeruleus", "Green", "Passeriformes", "Paridae",
+  "great tit", "parus major", "Green", "Passeriformes", "Paridae",
+  "coal tit", "periparus ater", "Green", "Passeriformes", "Paridae",
+  "long-tailed tit", "aegithalos caudatus", "Green", "Passeriformes", "Aegithalidae",
+  "chaffinch", "fringilla coelebs", "Green", "Passeriformes", "Fringillidae",
+  "goldfinch", "carduelis carduelis", "Green", "Passeriformes", "Fringillidae",
+  "siskin", "spinus spinus", "Green", "Passeriformes", "Fringillidae",
+  "greenfinch", "chloris chloris", "Green", "Passeriformes", "Fringillidae",
+  "wren", "troglodytes troglodytes", "Green", "Passeriformes", "Troglodytidae",
+  "blackbird", "turdus merula", "Green", "Passeriformes", "Turdidae",
+  "dunnock", "prunella modularis", "Green", "Passeriformes", "Prunellidae",
+  "wood pigeon", "columba palumbus", "Green", "Columbiformes", "Columbidae",
+  "feral pigeon", "columba livia domestica", "Green", "Columbiformes", "Columbidae",
+  "magpie", "pica pica", "Green", "Passeriformes", "Corvidae",
+  "jackdaw", "corvus monedula", "Green", "Passeriformes", "Corvidae",
+  "carrion crow", "corvus corone", "Green", "Passeriformes", "Corvidae",
+  "raven", "corvus corax", "Green", "Passeriformes", "Corvidae",
+  "collared dove", "streptopelia decaocto", "Green", "Columbiformes", "Columbidae",
+  "great spotted woodpecker", "dendrocopos major", "Green", "Piciformes", "Picidae"
+)
+
+bocc5_part3 <- tribble(
+  ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
+  
+  # Continue GREEN LIST
+  "goldcrest", "regulus regulus", "Green", "Passeriformes", "Regulidae",
+  "pheasant", "phasianus colchicus", "Green", "Galliformes", "Phasianidae",
+  "moorhen", "gallinula chloropus", "Green", "Gruiformes", "Rallidae",
+  "coot", "fulica atra", "Green", "Gruiformes", "Rallidae",
+  "mallard", "anas platyrhynchos", "Green", "Anseriformes", "Anatidae",
+  "tufted duck", "aythya fuligula", "Green", "Anseriformes", "Anatidae",
+  
+  # COMMON WATERBIRDS
+  "mute swan", "cygnus olor", "Green", "Anseriformes", "Anatidae",
+  "grey heron", "ardea cinerea", "Green", "Pelecaniformes", "Ardeidae",
+  "little egret", "egretta garzetta", "Green", "Pelecaniformes", "Ardeidae",
+  
+  # GREBES
+  "great crested grebe", "podiceps cristatus", "Green", "Podicipediformes", "Podicipedidae",
+  
+  # COMMON WADERS
+  "redshank", "tringa totanus", "Green", "Charadriiformes", "Scolopacidae",
+  "common sandpiper", "actitis hypoleucos", "Green", "Charadriiformes", "Scolopacidae",
+  
+  # COMMON SEA BIRDS
+  "gannet", "morus bassanus", "Green", "Suliformes", "Sulidae",
+  "great black-backed gull", "larus marinus", "Green", "Charadriiformes", "Laridae",
+  "lesser black-backed gull", "larus fuscus", "Green", "Charadriiformes", "Laridae",
+  "black-headed gull", "chroicocephalus ridibundus", "Green", "Charadriiformes", "Laridae",
+  
+  # COMMON COASTAL BIRDS
+  "oystercatcher", "haematopus ostralegus", "Green", "Charadriiformes", "Haematopodidae",
+  "curlew", "numenius arquata", "Green", "Charadriiformes", "Scolopacidae",
+  
+  # FAMILIAR SPECIES
+  "robin", "erithacus rubecula", "Green", "Passeriformes", "Muscicapidae",
+  "wren", "troglodytes troglodytes", "Green", "Passeriformes", "Troglodytidae",
+  "great tit", "parus major", "Green", "Passeriformes", "Paridae",
+  "chaffinch", "fringilla coelebs", "Green", "Passeriformes", "Fringillidae",
+  "goldfinch", "carduelis carduelis", "Green", "Passeriformes", "Fringillidae",
+  
+  # WILD PREDATORS
+  "kestrel", "falco tinnunculus", "Green", "Falconiformes", "Falconidae",
+  "peregrine falcon", "falco peregrinus", "Green", "Falconiformes", "Falconidae",
+  
+  # PIGEONS & DOVES
+  "wood pigeon", "columba palumbus", "Green", "Columbiformes", "Columbidae",
+  "feral pigeon", "columba livia domestica", "Green", "Columbiformes", "Columbidae",
+  "collared dove", "streptopelia decaocto", "Green", "Columbiformes", "Columbidae",
+  
+  # ADDITIONAL AMBER (not previously listed)
+  "grey wagtail", "motacilla cinerea", "Amber", "Passeriformes", "Motacillidae",
+  "reed bunting", "emberiza schoeniclus", "Amber", "Passeriformes", "Emberizidae",
+  "sedge warbler", "acrocephalus schoenobaenus", "Amber", "Passeriformes", "Acrocephalidae",
+  "grasshopper warbler", "locustella naevia", "Amber", "Passeriformes", "Locustellidae",
+  
+  # EXTRA RED (not previously included but common in UK lists)
+  "grey partridge", "perdix perdix", "Red", "Galliformes", "Phasianidae",
+  "ring ouzel", "turdus torquatus", "Red", "Passeriformes", "Turdidae",
+  "yellowhammer", "emberiza citrinella", "Red", "Passeriformes", "Emberizidae",
+  
+  # DUPLICATES REMOVED AUTOMATICALLY LATER
+  "house sparrow", "passer domesticus", "Green", "Passeriformes", "Passeridae",
+  
+  # END
+  NA, NA, NA, NA, NA
+) %>%
+  filter(!is.na(common_name))
+
+bocc5 <- bind_rows(bocc5_part1, bocc5_part2, bocc5_part3) %>%
+  distinct(common_name, .keep_all = TRUE)
+
+# Fix obvious BoCC5 mislabels (BoCC5 2021) and harmonise
+bocc5 <- bocc5 %>%
+  mutate(
+    common_name     = tolower(common_name),
+    scientific_name = tolower(scientific_name),
+    bocc_status     = tolower(bocc_status)
+  ) %>%
+  mutate(
+    bocc_status = case_when(
+      # Raptors/owls (headline fixes)
+      common_name %in% c("kestrel") ~ "amber",
+      common_name %in% c("golden eagle") ~ "amber",
+      common_name %in% c("peregrine","peregrine falcon") ~ "green",
+      common_name %in% c("buzzard") ~ "green",
+      common_name %in% c("red kite") ~ "green",
+      common_name %in% c("tawny owl") ~ "green",
+      
+      # Waders/gulls/terns/waterbirds
+      common_name %in% c("lapwing") ~ "red",
+      common_name %in% c("curlew") ~ "red",
+      common_name %in% c("redshank") ~ "amber",
+      common_name %in% c("snipe") ~ "amber",
+      common_name %in% c("woodcock") ~ "red",
+      common_name %in% c("herring gull") ~ "red",
+      common_name %in% c("kittiwake") ~ "red",
+      common_name %in% c("common gull") ~ "amber",
+      common_name %in% c("black-headed gull") ~ "amber",
+      common_name %in% c("lesser black-backed gull") ~ "amber",
+      common_name %in% c("great black-backed gull") ~ "amber",
+      common_name %in% c("sandwich tern","common tern","arctic tern") ~ "amber",
+      common_name %in% c("pochard") ~ "red",
+      common_name %in% c("mallard","tufted duck","goldeneye","goosander",
+                         "teal","wigeon","pintail","shoveler") ~ "amber",
+      # Geese (season/local dependence; default split)
+      common_name %in% c("pink-footed goose","barnacle goose") ~ "amber",
+      common_name %in% c("greylag goose","canada goose") ~ "green",
+      
+      # Common passerines to Green (not usually "important" in EcIA)
+      common_name %in% c("robin","blackbird","blue tit","great tit","coal tit","long-tailed tit",
+                         "wren","magpie","jackdaw","carrion crow","raven","jay",
+                         "wood pigeon","collared dove","great spotted woodpecker",
+                         "green woodpecker","goldcrest","firecrest","siskin","goldfinch",
+                         "treecreeper","stonechat","chiffchaff","blackcap","garden warbler",
+                         "whitethroat","gannet","oystercatcher","grey heron","little egret",
+                         "great crested grebe","little grebe","swallow","sand martin") ~ "green",
+      
+      # Amber/Red updates
+      common_name %in% c("dunnock","wheatear","willow warbler","lesser whitethroat",
+                         "kingfisher","dipper","rock pipit","meadow pipit",
+                         "grey wagtail","bullfinch","linnet","brambling","stock dove") ~ "amber",
+      common_name %in% c("lesser redpoll","rook","ring ouzel","house martin",
+                         "greenfinch","chaffinch") ~ "red",
+      
+      TRUE ~ bocc_status
+    )
+  ) %>%
+  mutate(bocc_status = tools::toTitleCase(bocc_status))
+
+# Keep only Red/Amber birds as "important" for EcIA
+bocc5_for_importance <- bocc5 %>% filter(bocc_status %in% c("Red","Amber"))
+
+############################################################
+# 2) MAMMALS: Scotland EPS/protected/priority list for EcIA
+############################################################
+
+mammals_imp <- tribble(
+  ~common_name,            ~scientific_name,          ~status,                    ~order,         ~family,
+  # EPS (Habitats Regulations)
+  "otter",                 "lutra lutra",             "EPS (fully protected)",    "Carnivora",    "Mustelidae",
+  "common pipistrelle",    "pipistrellus pipistrellus","EPS (fully protected)",   "Chiroptera",   "Vespertilionidae",
+  "soprano pipistrelle",   "pipistrellus pygmaeus",   "EPS (fully protected)",    "Chiroptera",   "Vespertilionidae",
+  "nathusius' pipistrelle","pipistrellus nathusii",   "EPS (fully protected)",    "Chiroptera",   "Vespertilionidae",
+  "lesser noctule",        "nyctalus leisleri",       "EPS (fully protected)",    "Chiroptera",   "Vespertilionidae",
+  "brown long-eared bat",  "plecotus auritus",        "EPS (fully protected)",    "Chiroptera",   "Vespertilionidae",
+  
+  # WCA S5 / Protected (Scotland)
+  "badger",                "meles meles",             "Protected (PBA 1992)",     "Carnivora",    "Mustelidae",
+  "red squirrel",          "sciurus vulgaris",        "Protected (WCA S5), SBL",  "Rodentia",     "Sciuridae",
+  "pine marten",           "martes martes",           "Protected (WCA S5)",       "Carnivora",    "Mustelidae",
+  "water vole",            "arvicola amphibius",      "Protected (WCA S5)",       "Rodentia",     "Cricetidae",
+  "wildcat",               "felis silvestris",        "EPS (fully protected)",    "Carnivora",    "Felidae",
+  "mountain hare",         "lepus timidus",           "Protected (Scotland)",     "Lagomorpha",   "Leporidae",
+  "beaver",                "castor fiber",            "EPS (fully protected)",    "Rodentia",     "Castoridae",
+  
+  # SBL Priority (often material in EcIA)
+  "hedgehog",              "erinaceus europaeus",     "SBL Priority",             "Eulipotyphla", "Erinaceidae",
+  "brown hare",            "lepus europaeus",         "SBL Priority",             "Lagomorpha",   "Leporidae"
+) %>%
+  mutate(
+    common_name = tolower(common_name),
+    scientific_name = tolower(scientific_name),
+    bocc_status = NA_character_,
+    group = "Mammal"
+  )
+
+# Optional: context mammals (not "protected species")
+# other_mammals_context <- tribble(
+#   ~common_name, ~scientific_name,      ~status,                              ~order,         ~family,
+#   "red deer",   "cervus elaphus",      "Managed (not protected species)",    "Artiodactyla", "Cervidae",
+#   "roe deer",   "capreolus capreolus", "Managed (not protected species)",    "Artiodactyla", "Cervidae",
+#   "red fox",    "vulpes vulpes",       "Common (no special protection)",     "Carnivora",    "Canidae"
+# ) %>% mutate(
+#   common_name = tolower(common_name),
+#   scientific_name = tolower(scientific_name),
+#   bocc_status = NA_character_,
+#   group = "Mammal"
+# )
+
+############################################################
+# 3) BUILD LOOKUP (Birds Red/Amber only + Protected/priority mammals)
+############################################################
+
+lookup_all <- bind_rows(
+  bocc5_for_importance %>%
+    mutate(group = "Bird", status = bocc_status) %>%
+    select(common_name, scientific_name, status, order, family, group),
+  mammals_imp %>%
+    select(common_name, scientific_name, status, order, family, group)
+  # , other_mammals_context   # optionally include as non-important context
+) %>%
+  mutate(
+    common_name     = tolower(common_name),
+    scientific_name = tolower(scientific_name)
+  ) %>%
+  distinct(common_name, scientific_name, .keep_all = TRUE)
+
+############################################################
+# 4) NORMALISE OBSERVED NAMES; OPTIONAL SYNONYMS
+############################################################
+
+assoc <- assoc %>%
+  mutate(
+    common_name     = tolower(str_squish(common_name)),
+    scientific_name = tolower(str_squish(scientific_name))
+  )
+
+synonyms <- tribble(
+  ~common_name_obs,        ~common_name_std,
+  "peregrine",             "peregrine falcon",
+  "nathusius pipistrelle", "nathusius' pipistrelle"
+)
+
+assoc <- assoc %>%
+  left_join(synonyms, by = c("common_name" = "common_name_obs")) %>%
+  mutate(common_name = coalesce(common_name_std, common_name)) %>%
+  select(-common_name_std)
+
+############################################################
+# 5) FUZZY MATCH (COMMON and SCIENTIFIC), COMBINE, DEDUPE
+############################################################
+
+matched_common <- stringdist_inner_join(
+  assoc,
+  lookup_all,
+  by = c("common_name" = "common_name"),
+  max_dist     = 2,
+  distance_col = "dist_common"
+)
+
+matched_sci <- stringdist_inner_join(
+  assoc,
+  lookup_all,
+  by = c("scientific_name" = "scientific_name"),
+  max_dist     = 2,
+  distance_col = "dist_sci"
+)
+
+matched_all <- bind_rows(matched_common, matched_sci) %>%
+  mutate(key_sci = coalesce(scientific_name.y, scientific_name.x)) %>%
+  arrange(event_id, key_sci, dist_common, dist_sci) %>%
+  distinct(event_id, key_sci, .keep_all = TRUE) %>%
+  rename(
+    common_name_obs       = common_name.x,
+    scientific_name_obs   = scientific_name.x,
+    common_name_ref       = common_name.y,
+    scientific_name_ref   = scientific_name.y
+  )
+
+############################################################
+# 6) FINAL IMPORTANT SPECIES OBJECT (Birds: Red/Amber; Mammals: EPS/Protected/SBL)
+############################################################
+
+important_species_all <- matched_all %>%
+  transmute(
+    event_id,
+    region,
+    group,                                   # Bird / Mammal
+    common_name     = coalesce(common_name_ref, common_name_obs),
+    scientific_name = coalesce(scientific_name_ref, scientific_name_obs),
+    status          = status,                # Birds: Red/Amber; Mammals: EPS/Protected/SBL
+    order,
+    family
+  )
+
+# Optional quick QA
+# important_species_all %>% filter(group == "Bird", status == "Green") %>% distinct(common_name)  # should be empty
+# important_species_all %>% filter(group == "Mammal") %>% count(status, sort = TRUE)
+# assoc %>% anti_join(lookup_all, by = c("common_name","scientific_name")) %>% distinct(common_name, scientific_name)
+
+
+############################################################
+# 10. PLOTS
+############################################################
+# ==========================================================
+# EcIA-ready plots: richness, abundance, heatmap + 2 extras
+# Requires: important_species_all with columns:
+#   event_id, region, group (Bird/Mammal), common_name, scientific_name,
+#   status (Bird: Red/Amber; Mammal: EPS/Protected/SBL), order, family
+# ==========================================================
+
+library(tidyverse)
+library(scales)
+library(forcats)
+# install.packages("patchwork") # if needed
+library(patchwork)
+
+# ----------------------------
+# 0) General settings & helpers
+# ----------------------------
+
+# Exclude out-of-boundary events if event_id encodes this
+dat <- important_species_all %>%
+  filter(!str_detect(tolower(event_id), "\\boob\\b"))
+
+# Consistent ordering and labels
+dat <- dat %>%
+  mutate(
+    group = factor(group, levels = c("Bird","Mammal")),
+    region = factor(region),
+    species_label = str_to_title(common_name)  # nicer labels for plots
+  )
+
+# Palettes
+pal_region <- c("North" = "#E76F51", "South" = "#2A9D8F") %>%
+  { .[intersect(names(.), levels(dat$region))] } # keep only present regions
+pal_bocc   <- c("Red" = "#C1121F", "Amber" = "#FFB000")
+
+theme_ecia <- function(base_size = 11) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "grey30"),
+      axis.title.x = element_text(margin = margin(t = 8)),
+      axis.title.y = element_text(margin = margin(r = 8)),
+      legend.position = "right",
+      strip.text = element_text(face = "bold")
+    )
 }
 
-# ---------------------------
-# Important species graphs
-# ---------------------------
-# NOTE: These rely on objects 'imp_rich', 'imp_abund', 'imp', 'imp_cols' defined elsewhere.
-# They remain unchanged here. If you want “important invertebrates” to also be at order level,
-# adapt those objects to use 'taxon_unit' the same way as above.
+# -------------------------------------------------
+# 1) Species richness by region and group (bar + %)
+# -------------------------------------------------
 
-# Example titles fixed to reflect analysis unit
-# (The rest of your 'Important species graphs' code can follow unchanged.)
+richness <- dat %>%
+  distinct(region, group, scientific_name) %>%
+  count(region, group, name = "n_species") %>%
+  group_by(region) %>%
+  mutate(pct = n_species / sum(n_species)) %>%
+  ungroup()
+
+fig_richness <- ggplot(richness, aes(x = region, y = n_species, fill = group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = n_species),
+            position = position_dodge(width = 0.8), vjust = -0.4, size = 3.2) +
+  scale_fill_manual(values = c("Bird" = "#577590", "Mammal" = "#43AA8B")) +
+  scale_y_continuous(expand = expansion(mult = c(0, .1))) +
+  labs(
+    title = "Species richness by region and group",
+    x = "Region",
+    y = "Number of species",
+    fill = "Group"
+  ) +
+  theme_ecia()
+fig_richness
+
+
+
+# 2) Abundance by species (Cleveland bars; top-N)
+# -------------------------------------------------
+top_n_per_group <- 10
+
+abund_species <- dat %>%
+  count(group, region, species_label, name = "n_records") %>%
+  group_by(group, species_label) %>%
+  mutate(total = sum(n_records)) %>%
+  ungroup() %>%
+  group_by(group) %>%
+  slice_max(order_by = total, n = top_n_per_group, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(species_label = fct_reorder(species_label, total))
+
+fig_abundance <- ggplot(abund_species, aes(x = n_records, y = species_label, fill = region)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = n_records),
+            position = position_dodge(width = 0.8), hjust = -0.2, size = 3) +
+  facet_wrap(~ group, scales = "free_y") +
+  scale_fill_manual(values = pal_region) +
+  scale_x_continuous(expand = expansion(mult = c(0, .1))) +
+  labs(
+    title = "Abundance (record count) by species and region",
+    x = "Number of records",
+    y = "Species",
+    fill = "Region"
+  ) +
+  theme_ecia()
+
+
+fig_abundance
+
+
+# -------------------------------------------------
+# 3) Species–region heatmap (counts)
+# -------------------------------------------------
+
+# --- add species-level conservation category ---
+species_status <- dat %>%
+  mutate(category = case_when(
+    # Birds: BoCC
+    group == "Bird" & status %in% c("Red", "Amber") ~ status,
+    group == "Bird"                                 ~ "Other",
+    
+    # Mammals: protection categories
+    group == "Mammal" & str_detect(status, regex("EPS", ignore_case = TRUE)) ~ "EPS",
+    group == "Mammal" & str_detect(status, regex("Protected|WCA|PBA", ignore_case = TRUE)) ~ "Protected",
+    group == "Mammal" & str_detect(status, regex("SBL", ignore_case = TRUE)) ~ "SBL Priority",
+    group == "Mammal" ~ "Other",
+    
+    TRUE ~ "Other"
+  )) %>%
+  distinct(group, species_label, category)
+
+# --- rebuild heatmap data with conservation category attached ---
+heat <- dat %>%
+  count(group, species_label, region, name = "n_records") %>%
+  group_by(group, species_label) %>%
+  mutate(total = sum(n_records)) %>%
+  ungroup() %>%
+  left_join(species_status, by = c("group", "species_label")) %>%
+  mutate(
+    species_label = fct_reorder(species_label, total),
+    category = factor(
+      category,
+      levels = c("SBL Priority", "Protected", "EPS", "Amber", "Red", "Other")
+    )
+  )
+
+# --- unified palette (add to your palette section if needed) ---
+pal_comp <- c(
+  "Amber"        = "#FFB000",
+  "Red"          = "#C1121F",
+  "EPS"          = "#2D6A4F",
+  "Protected"    = "#40916C",
+  "SBL Priority" = "#74C69D",
+  "Other"        = "grey80"
+)
+
+# --- updated heatmap plot ---
+fig_heatmap <- ggplot(heat, aes(x = region, y = species_label)) +
+  geom_tile(aes(fill = category), color = "grey90", linewidth = 0.25) +
+  geom_text(aes(label = n_records), color = "black", size = 3.3, fontface = "bold") +
+  facet_wrap(~ group, scales = "free_y", ncol = 1, strip.position = "top") +
+  scale_fill_manual(values = pal_comp, name = "Category") +
+  labs(
+    title = "Species–region heatmap of records",
+    subtitle = "Tile colour indicates conservation category; numbers show record counts",
+    x = "Region",
+    y = "Species"
+  ) +
+  theme_ecia() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text  = element_text(size = 9),
+    panel.spacing.y = unit(1.2, "lines"),
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    axis.text.y = element_text(size = 9),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11, margin = margin(b = 10)),
+    plot.margin = margin(10, 15, 10, 10)
+  )
+
+fig_heatmap
+
+
+# -------------------------------------------------
+# 4) Bird BoCC composition (Red vs Amber) by region — STACKED COUNTS
+# -------------------------------------------------
+
+birds_comp_counts <- dat %>%
+  filter(group == "Bird", status %in% c("Red","Amber")) %>%
+  mutate(status = factor(status, levels = c("Amber","Red"))) %>%  # Amber at bottom, Red on top
+  count(region, status, name = "n") %>%
+  group_by(region) %>%
+  mutate(total = sum(n)) %>%
+  ungroup()
+
+fig_bocc_comp_counts <- ggplot(birds_comp_counts, aes(region, n, fill = status)) +
+  geom_col(width = 0.7, color = "white") +
+  # label each segment with its count (hidden for zeros)
+  geom_text(
+    aes(label = ifelse(n > 0, n, "")),
+    position = position_stack(vjust = 0.5), size = 3.2, color = "black"
+  ) +
+  # optional total on top of each bar
+  geom_text(
+    data = distinct(birds_comp_counts, region, total),
+    aes(region, total, label = paste0("Total: ", total)),
+    vjust = -0.5, size = 3.2, fontface = "bold", inherit.aes = FALSE
+  ) +
+  scale_fill_manual(values = pal_bocc) +
+  scale_y_continuous(expand = expansion(mult = c(0, .1))) +
+  labs(
+    title = "Bird BoCC status by region (stacked counts)",
+    x = "Region", y = "Number of records", fill = "BoCC status"
+  ) +
+  theme_ecia()
+fig_bocc_comp_counts
+# -------------------------------------------------
+# 5) Mammal protection category composition by region — STACKED COUNTS
+# -------------------------------------------------
+
+mammals_comp_counts <- dat %>%
+  filter(group == "Mammal") %>%
+  mutate(protection = case_when(
+    str_detect(status, regex("EPS", ignore_case = TRUE)) ~ "EPS",
+    str_detect(status, regex("Protected|WCA|PBA", ignore_case = TRUE)) ~ "Protected",
+    str_detect(status, regex("SBL", ignore_case = TRUE)) ~ "SBL Priority",
+    TRUE ~ status
+  )) %>%
+  mutate(protection = factor(protection, levels = c("SBL Priority","Protected","EPS"))) %>%
+  count(region, protection, name = "n") %>%
+  group_by(region) %>%
+  mutate(total = sum(n)) %>%
+  ungroup()
+
+pal_protect <- c("EPS" = "#2D6A4F", "Protected" = "#40916C", "SBL Priority" = "#74C69D")
+
+fig_mammal_comp_counts <- ggplot(mammals_comp_counts, aes(region, n, fill = protection)) +
+  geom_col(width = 0.7, color = "white") +
+  geom_text(
+    aes(label = ifelse(n > 0, n, "")),
+    position = position_stack(vjust = 0.5), size = 3.2, color = "black"
+  ) +
+  geom_text(
+    data = distinct(mammals_comp_counts, region, total),
+    aes(region, total, label = paste0("Total: ", total)),
+    vjust = -0.5, size = 3.2, fontface = "bold", inherit.aes = FALSE
+  ) +
+  scale_fill_manual(values = pal_protect) +
+  scale_y_continuous(expand = expansion(mult = c(0, .1))) +
+  labs(
+    title = "Mammal protection category by region (stacked counts)",
+    x = "Region", y = "Number of records", fill = "Category"
+  ) +
+  theme_ecia()
+
+fig_mammal_comp_counts
+
+
+
+
+#----plot with boirds and mammals stacked bar of amber and red ----
+# Build bird composition (Red/Amber)
+birds_comp_counts <- dat %>%
+  filter(group == "Bird", status %in% c("Red","Amber")) %>%
+  mutate(category = factor(status, levels = c("Amber","Red"))) %>%  # Amber bottom, Red top
+  count(group, region, category, name = "n")
+
+# Build mammal composition (EPS / Protected / SBL)
+mammals_comp_counts <- dat %>%
+  filter(group == "Mammal") %>%
+  mutate(category = case_when(
+    str_detect(status, regex("EPS", ignore_case = TRUE)) ~ "EPS",
+    str_detect(status, regex("Protected|WCA|PBA", ignore_case = TRUE)) ~ "Protected",
+    str_detect(status, regex("SBL", ignore_case = TRUE)) ~ "SBL Priority",
+    TRUE ~ status
+  )) %>%
+  mutate(category = factor(category, levels = c("SBL Priority","Protected","EPS"))) %>% # SBL bottom, EPS top
+  count(group, region, category, name = "n")
+
+# Combine and order categories across both groups
+comp_all <- bind_rows(birds_comp_counts, mammals_comp_counts) %>%
+  mutate(
+    region = factor(region),
+    group = factor(group, levels = c("Bird","Mammal")),
+    category = factor(category, levels = c("SBL Priority","Protected","EPS","Amber","Red"))
+  )
+
+# Totals per region in each facet
+comp_totals <- comp_all %>%
+  group_by(group, region) %>%
+  summarise(total = sum(n), .groups = "drop")
+
+# Unified palette for all categories
+pal_comp <- c(
+  "Amber" = "#FFB000",
+  "Red" = "#C1121F",
+  "EPS" = "#2D6A4F",
+  "Protected" = "#40916C",
+  "SBL Priority" = "#74C69D"
+)
+
+fig_comp_combined <- ggplot(comp_all, aes(region, n, fill = category)) +
+  geom_col(width = 0.7, color = "white") +
+  # Segment labels
+  geom_text(
+    aes(label = ifelse(n > 0, n, "")),
+    position = position_stack(vjust = 0.5),
+    size = 3.2
+  ) +
+  # Totals per stacked bar
+  geom_text(
+    data = comp_totals,
+    aes(region, total, label = paste0("Total: ", total)),
+    vjust = -0.5, size = 3.2, fontface = "bold", inherit.aes = FALSE
+  ) +
+  facet_wrap(~ group, ncol = 2, scales = "fixed") +
+  scale_fill_manual(values = pal_comp, drop = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0, .1))) +
+  labs(
+    title = "Composition of important records by region (Bird BoCC and Mammal protection)",
+    x = "Region", y = "Number of records", fill = "Category"
+  ) +
+  theme_ecia()
+
+fig_comp_combined
