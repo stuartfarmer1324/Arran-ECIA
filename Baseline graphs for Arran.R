@@ -1,6 +1,6 @@
 # Arran biodiversity analysis + important species pipeline
 # Uses associatedoccurences.csv as the data source
-# Imputes genus-only records to synthetic species without altering real species
+# Imputes genus-only records to synthetic taxa without altering real species
 # Produces all-taxa summaries plus important-species extracts
 
 # ---- Libraries ----
@@ -25,8 +25,6 @@ library(scales)
 
 # ---- Load occurrences ----
 
-# Point to your occurrences CSV. If missing, fall back to a tiny demo dataset so
-# the script still runs for testing/documentation.
 occurs_path <- Sys.getenv(
   "OCCURS_PATH",
   unset = "C:/Users/stuar/Documents/Masters/Arran/Data/associatedoccurences.csv"
@@ -53,9 +51,8 @@ if (file.exists(occurs_path)) {
                        "Pinales", "Pinales", "Hymenoptera", "Odonata"),
     taxonRank      = rep("Species", 8),
     occurrenceStatus = rep("Present", 8),
-    basisOfRecord  = c("HumanObservation", "HumanObservation", "HumanObservation",
-                       "HumanObservation", "HumanObservation", "HumanObservation",
-                       "HumanObservation", "HumanObservation")
+    basisOfRecord  = rep("HumanObservation", 8),
+    individualCount = c(3, 5, 1, 2, 10, 8, 4, 6)
   )
 }
 
@@ -79,6 +76,9 @@ assoc <- assoc %>%
     occurrence_status = str_to_sentence(str_squish(occurrenceStatus)),
     basis_of_record   = str_to_sentence(str_squish(basisOfRecord)),
     
+    # abundance: make sure it's numeric, treat missing as 0
+    individualCount   = replace_na(as.numeric(individualCount), 0),
+    
     # Hillside / region (same thing, N vs S)
     region = case_when(
       str_starts(event_id, "N") ~ "North",
@@ -87,43 +87,121 @@ assoc <- assoc %>%
     )
   )
 
-# ---- Genus → synthetic species imputation ----
+# ---- Genus → synthetic taxon imputation (hybrid sci + common name) ----
 
-# Helper: identify if scientific name looks like a proper binomial
-is_binomial <- function(x) {
-  # Returns TRUE when a string looks like a species binomial and FALSE for
-  # genus-only / "sp." style labels (keeps later logic clean and readable).
+# Helper: extract scientific genus if present
+extract_genus <- function(x) {
   x <- str_trim(x)
-  pat <- "^[A-Z][a-z]+\\s+[a-z][a-z\\-]+$"
-  good <- str_detect(x, pat)
-  bad  <- str_detect(x, regex("\\b(sp|spp|species|cf|aff|indet|unknown)\\b", ignore_case = TRUE))
-  good & !bad
+  
+  # Extract first word
+  genus <- word(x, 1)
+  
+  # TRUE for valid genera (capitalized Latin-like)
+  is_valid <- str_detect(genus, "^[A-Z][a-z]+$")
+  
+  # Return genus if valid, otherwise NA
+  ifelse(is_valid, genus, NA_character_)
 }
 
-# Work with Title-case genus for imputation
+
+# Helper: detect binomial species names
+is_binomial <- function(x) {
+  x <- str_trim(x)
+  pattern <- "^[A-Z][a-z]+\\s+[a-z][a-z\\-]+$"
+  valid_species <- str_detect(x, pattern)
+  flagged_terms <- str_detect(
+    x,
+    regex("\\b(sp|spp|species|cf|aff|indet|unknown)\\b", ignore_case = TRUE)
+  )
+  valid_species & !flagged_terms
+}
+
+# Helper: simple common-name stemmer for inverts / fuzzy things
+stem_common <- function(name_raw) {
+  # Make sure name_raw is character
+  name_raw <- tolower(name_raw) %>% str_squish()
+  
+  # If NA or empty -> return NA
+  is_bad <- is.na(name_raw) | name_raw == ""
+  name_raw[is_bad] <- NA_character_
+  
+  # Strip qualifiers
+  name_raw <- str_replace_all(
+    name_raw,
+    regex("(larvae|larva|nymph|case|cased|caseless|adult|juvenile)", ignore_case = TRUE),
+    ""
+  )
+  
+  name_raw <- str_replace_all(
+    name_raw,
+    regex("(common|unknown|unidentified|sp\\.|species)", ignore_case = TRUE),
+    ""
+  )
+  
+  name_raw <- str_squish(name_raw)
+  
+  # Extract first word core
+  core <- word(name_raw, 1)
+  
+  # Standardise a few common groups
+  core <- case_when(
+    core %in% c("caddis", "caddisfly") ~ "caddisfly",
+    core %in% c("fly", "true")         ~ "fly",
+    core %in% c("spider")              ~ "spider",
+    core %in% c("tick")                ~ "tick",
+    core %in% c("aphid")               ~ "aphid",
+    core %in% c("ant")                 ~ "ant",
+    TRUE ~ core
+  )
+  
+  # Replace empty strings with NA
+  core[core == ""] <- NA_character_
+  
+  core
+}
+
+
 assoc <- assoc %>%
   mutate(
+    # Clean scientific names
     sci_clean = case_when(
-      # If we already have something that looks like a binomial, capitalise nicely
       !is.na(scientific_raw) & scientific_raw != "" &
         is_binomial(str_to_title(scientific_raw)) ~ str_to_title(scientific_raw),
       TRUE ~ str_to_title(scientific_raw)
     ),
-    genus      = word(sci_clean, 1),
-    epithet    = word(sci_clean, 2),
-    epithet_lc = tolower(coalesce(epithet, "")),
-    missing_epithet = is.na(epithet) |
-      epithet_lc == "" |
-      str_detect(epithet_lc, regex("^(sp|spp|sp\\.|spp\\.|cf\\.?|aff\\.?|indet\\.?|unknown)$",
-                                   ignore_case = TRUE)),
     
-    # taxon_unit:
-    # - proper binomials → use Genus species (unchanged)
-    # - genus-only / sp. / spp. → assign one synthetic species per genus
+    sci_genus   = extract_genus(sci_clean),
+    sci_epithet = word(sci_clean, 2),
+    epithet_lc  = tolower(coalesce(sci_epithet, "")),
+    
+    missing_epithet = (
+      is.na(sci_epithet) |
+        epithet_lc == "" |
+        str_detect(epithet_lc, regex("^(sp|spp|cf|aff|indet|unknown)$",
+                                     ignore_case = TRUE))
+    ),
+    
+    # Common-name stem for cases with no reliable scientific genus
+    common_stem = stem_common(common_name_raw),
+    
+    # Hybrid grouping key:
+    #  - if scientific genus exists → use that
+    #  - else fall back to common-name stem
+    #  - else "unidentified"
+    genus_group = case_when(
+      !is.na(sci_genus)      ~ tolower(sci_genus),
+      is.na(sci_genus) &
+        !is.na(common_stem)  ~ common_stem,
+      TRUE                   ~ "unidentified"
+    ),
+    
+    # Final taxon unit:
+    #  - true species keep their cleaned binomial
+    #  - genus-only records collapse to "<group> sp."
     taxon_unit = case_when(
-      !is.na(genus) & !missing_epithet ~ str_c(genus, " ", epithet),
-      !is.na(genus) & missing_epithet ~ str_c(genus, " species_", tolower(gsub("[^A-Za-z0-9]+", "", genus))),
-      TRUE ~ NA_character_
+      !missing_epithet ~ str_to_lower(sci_clean),           # real species
+      missing_epithet  ~ paste0(genus_group, " sp."),       # genus/common-group level
+      TRUE             ~ NA_character_
     )
   )
 
@@ -160,15 +238,15 @@ assoc_use <- assoc_use %>%
       # Plants
       kingdom == "Plantae" | str_detect(evid, "^[ns]\\d?p") ~ "Plants",
       
-      # Bats (by order, event code CR, or audiomoth)
+      # Bats
       str_detect(oname_lc, "chiroptera") |
         str_detect(evid, "cr") |
         str_detect(bid, "audiomoth") ~ "Bats",
       
-      # Birds (by event IDs)
+      # Birds
       str_detect(evid, bird_event_pat) ~ "Birds",
       
-      # Aquatic invertebrates
+      # Aquatic inverts
       str_detect(evid, "fi") |
         str_detect(oname_lc, str_c(aquatic_orders, collapse = "|")) |
         str_detect(cname_lc,
@@ -178,14 +256,14 @@ assoc_use <- assoc_use %>%
       # Mammals (non-bats)
       str_detect(oname_lc, str_c(setdiff(mammal_orders, "chiroptera"), collapse = "|")) ~ "Mammals",
       
-      # Terrestrial invertebrates
+      # Terrestrial inverts
       str_detect(oname_lc, str_c(terrestrial_orders, collapse = "|")) |
         str_detect(evid, "tin|tip|tit") ~ "Terrestrial invertebrates",
       
       TRUE ~ "Other"
     ),
     
-    hillside = region  # alias, to match your original plotting terminology
+    hillside = region  # alias to keep old naming
   )
 
 # Only keep rows with usable taxon_unit
@@ -193,10 +271,10 @@ oc_use <- assoc_use %>%
   filter(
     !is.na(taxon_unit),
     taxon_unit != "",
-    !str_detect(taxon_unit, regex("^No records|Unidentified", ignore_case = TRUE))
+    !str_detect(taxon_unit, regex("^no records|unidentified", ignore_case = TRUE))
   )
 
-# ---- All-taxa plots (not important-only) ----
+# ---- All-taxa plots (richness / record-based, not abundance) ----
 
 group_levels <- c("Overall","Plants","Birds","Mammals","Bats",
                   "Terrestrial invertebrates","Aquatic invertebrates")
@@ -219,7 +297,6 @@ plot_dat <- bind_rows(rich_by_group, rich_overall) %>%
   ) %>%
   arrange(group, hillside)
 
-# Prepare a wide summary for the diverging plot
 summ_diff <- plot_dat %>%
   select(group, hillside, n_species) %>%
   tidyr::complete(group, hillside, fill = list(n_species = 0)) %>%
@@ -237,8 +314,8 @@ p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
   scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
   labs(
     title    = "Richness by sampled group and hillside",
-    subtitle = "Distinct species per hillside (genus-only records imputed to synthetic species)",
-    x = "Richness (species)",
+    subtitle = "Number of distinct taxa per hillside (synthetic taxa for genus-only or group-level records)",
+    x = "Richness (taxa)",
     y = "Group",
     fill = NULL
   ) +
@@ -246,14 +323,11 @@ p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
   theme(
     legend.position    = "top",
     panel.grid.major.y = element_blank(),
-    
-    # AXIS LINES + TICKS
     axis.line.x  = element_line(colour = "black", linewidth = 0.6),
     axis.line.y  = element_line(colour = "black", linewidth = 0.6),
     axis.ticks.x = element_line(colour = "black"),
     axis.ticks.y = element_line(colour = "black")
   )
-
 
 p_rich_all
 
@@ -269,7 +343,6 @@ df_div <- summ_diff %>%
     group = fct_relevel(group, "Overall", after = Inf)
   )
 
-# ensure ±6 appear on axis
 auto_breaks <- scales::pretty_breaks(5)(range(df_div$diff))
 forced_breaks <- sort(unique(c(auto_breaks, -6, 6)))
 
@@ -330,7 +403,7 @@ p_diverge_final <- ggplot(df_div, aes(y = group)) +
 
 p_diverge_final
 
-# 6.3 Rank–abundance across all species, per hillside
+# 6.3 Rank–abundance (actually record frequency) per hillside
 rank_abund_all <- oc_use %>%
   count(hillside, taxon_unit, name = "records") %>%
   group_by(hillside) %>%
@@ -354,7 +427,7 @@ p_rank_all <- ggplot(rank_abund_all, aes(x = rank, y = records, colour = hillsid
 
 p_rank_all
 
-# 6.4 Similarity (Jaccard) between hillsides by group
+# 6.4 Similarity (Jaccard) between hillsides by group (richness-based)
 jaccard_by_group <- oc_use %>%
   distinct(group, hillside, taxon_unit) %>%
   group_by(group) %>%
@@ -387,42 +460,32 @@ p_jaccard_all <- ggplot(jaccard_by_group,
 
 p_jaccard_all
 
-# 6.5 Per-group abundance plots (helper function, all taxa)
+# 6.5 Per-group "abundance" but as record counts, not individuals
+# --- Grouped abundance function (records, not individualCount) ---
 
-grouped_species_abundance <- function(df, grp_label, top_n = Inf) {
-  
-  if (!"group" %in% names(df)) {
-    stop("Error: dataset does not contain a 'group' column.")
-  }
-  if (!grp_label %in% unique(df$group)) {
-    warning(paste0("Group '", grp_label, "' not found. Available groups: ",
-                   paste(unique(df$group), collapse = ", ")))
-    return(invisible(NULL))
-  }
-  if (!"taxon_unit" %in% names(df)) {
-    stop("Error: dataset does not contain 'taxon_unit'.")
-  }
-  if (!"hillside" %in% names(df)) {
-    stop("Error: dataset does not contain 'hillside'.")
-  }
+plot_group_abundance <- function(df, grp_label, top_n = Inf) {
   
   df_grp <- df %>% filter(group == grp_label)
-  if (nrow(df_grp) == 0) return(invisible(NULL))
+  if (nrow(df_grp) == 0) return(NULL)
   
+  # Count records per species per hillside
   dat0 <- df_grp %>%
     count(hillside, taxon_unit, name = "records")
   
+  # Fill missing combinations
   dat <- dat0 %>%
-    tidyr::complete(taxon_unit, hillside = c("North","South"),
+    tidyr::complete(taxon_unit, hillside = c("North", "South"),
                     fill = list(records = 0)) %>%
-    mutate(hillside = factor(hillside, levels = c("North","South")))
+    mutate(hillside = factor(hillside, levels = c("North", "South")))
   
+  # Compute total records per species for ranking
   totals <- dat %>%
     group_by(taxon_unit) %>%
     summarise(total_records = sum(records), .groups = "drop")
   
   dat <- dat %>% left_join(totals, by = "taxon_unit")
   
+  # Restrict to top N species if wanted
   if (is.finite(top_n)) {
     keep <- totals %>%
       arrange(desc(total_records)) %>%
@@ -434,41 +497,103 @@ grouped_species_abundance <- function(df, grp_label, top_n = Inf) {
   dat <- dat %>%
     mutate(taxon_unit = reorder(taxon_unit, total_records))
   
-  if (!exists("hillside_dodge")) {
-    hillside_dodge <- position_dodge(width = 0.75)
-  }
-  
   ggplot(dat, aes(x = taxon_unit, y = records, fill = hillside)) +
-    geom_col(position = hillside_dodge, width = 0.7, colour = "white") +
+    geom_col(position = position_dodge(width = 0.7), 
+             width = 0.65, colour = "white") +
     geom_text(aes(label = records),
-              position = hillside_dodge,
-              hjust = -0.1, size = 3, colour = "grey25") +
+              position = position_dodge(width = 0.7),
+              hjust = -0.1, size = 3.2) +
     coord_flip(clip = "off") +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
     labs(
-      title = paste0(grp_label, " — records by hillside (species)"),
-      x     = NULL,
-      y     = "Record count",
-      fill  = NULL
+      title = paste0(grp_label, " — record-based abundance (species)"),
+      subtitle = "Counts of sampling-event records per species",
+      x = NULL,
+      y = "Record count",
+      fill = "Region"
     ) +
     theme_minimal(base_size = 12) +
     theme(
       legend.position = "top",
-      axis.line.x = element_line(colour = "black", linewidth = 0.6),
-      axis.line.y = element_line(colour = "black", linewidth = 0.6),
-      axis.ticks.x = element_line(colour = "black"),
-      axis.ticks.y = element_line(colour = "black")
+      axis.line = element_line(colour = "black"),
+      axis.ticks = element_line()
     )
 }
 
+major_groups <- c(
+  "Birds",
+  "Mammals",
+  "Bats",
+  "Plants",
+  "Terrestrial invertebrates",
+  "Aquatic invertebrates"
+)
 
-# Example call per group (comment/uncomment as needed)
-# for (g in c("Birds","Mammals","Bats","Terrestrial invertebrates","Aquatic invertebrates","Plants")) {
-#   if (g %in% unique(oc_use$group)) print(grouped_species_abundance(oc_use, g))
-# }
+plots_grouped_abundance <- lapply(major_groups, function(g) {
+  message("Plotting: ", g)
+  plot_group_abundance(oc_use, g)
+})
+
+plots_grouped_abundance
+
+
+#----overall abundance plot----
+# ---- Total individuals per group, North vs South (log10, no 'Other') ----
+
+abund_group_ns <- assoc_use %>%
+  filter(group != "Other") %>%                      # ← remove "Other"
+  group_by(group, hillside) %>%
+  summarise(total_individuals = sum(individualCount, na.rm = TRUE),
+            .groups = "drop") %>%
+  filter(!is.na(group)) %>%
+  mutate(
+    hillside = factor(hillside, levels = c("North", "South")),
+    group = fct_reorder(group, total_individuals, .fun = sum)
+  )
+
+# Log10 breaks that cover the whole range
+log_breaks <- scales::log_breaks()(range(abund_group_ns$total_individuals))
+
+overall_abundance_plot <- ggplot(abund_group_ns,
+                                 aes(x = group, y = total_individuals, fill = hillside)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65,
+           colour = "white") +
+  
+  # ---- Label directly on top of each bar ----
+geom_text(
+  aes(label = total_individuals, y = total_individuals),
+  position = position_dodge(width = 0.75),
+  vjust = -0.4,        # ← vertical position: slightly above bar
+  size = 3.7,
+  colour = "black"
+) +
+  
+  scale_y_log10(
+    breaks = log_breaks,
+    labels = scales::comma_format(),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
+  labs(
+    title = "Total individuals recorded per group by Candidtae Site",
+    x = "Group",
+    y = "Total individuals (log10 scale)",
+    fill = "Region"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    panel.grid.minor.y = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+overall_abundance_plot
+
+
 
 # ---- Birds: BoCC5 lists ----
-
 bocc5_part1 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
   
@@ -845,14 +970,7 @@ lookup_all <- bind_rows(
     scientific_name = tolower(scientific_name)
   ) %>%
   distinct(common_name, scientific_name, .keep_all = TRUE)
-
-# ---- Normalise observed names ----
-
-assoc <- assoc %>%
-  mutate(
-    common_name     = tolower(str_squish(common_name)),
-    scientific_name = tolower(str_squish(scientific_name))
-  )
+# ---- Normalise names & aggregate per event for matching ----
 
 synonyms <- tribble(
   ~common_name_obs,        ~common_name_std,
@@ -860,88 +978,55 @@ synonyms <- tribble(
   "nathusius pipistrelle", "nathusius' pipistrelle"
 )
 
-assoc <- assoc %>%
+assoc_imp <- assoc %>%
+  mutate(
+    common_name     = tolower(str_squish(common_name)),
+    scientific_name = tolower(str_squish(scientific_name))
+  ) %>%
   left_join(synonyms, by = c("common_name" = "common_name_obs")) %>%
   mutate(common_name = coalesce(common_name_std, common_name)) %>%
   select(-common_name_std)
 
-# ---- Fuzzy matching ----
+# Aggregate to one row per event × species (common name) first
+obs_for_match <- assoc_imp %>%
+  filter(!is.na(common_name)) %>%   # we match by common name for a non-specialist output
+  group_by(event_id, region, common_name, scientific_name) %>%
+  summarise(individualCount = sum(individualCount, na.rm = TRUE), .groups = "drop")
 
-# Filter out NA names so fuzzyjoin doesn't choke on them
-assoc_clean  <- assoc %>% dplyr::filter(!is.na(common_name))
-lookup_clean <- lookup_all %>% dplyr::filter(!is.na(common_name))
+# ---- Exact join only (no fuzzy) to avoid over-counting ----
 
-matched_common <- stringdist_inner_join(
-  assoc_clean,
-  lookup_clean,
-  by = c("common_name" = "common_name"),
-  max_dist     = 2,
-  distance_col = "dist_common"
-)
-
-assoc_cleans  <- assoc %>% dplyr::filter(!is.na(scientific_name))
-lookup_cleans <- lookup_all %>% dplyr::filter(!is.na(scientific_name))
-
-matched_sci <- stringdist_inner_join(
-  assoc_cleans,
-  lookup_cleans,
-  by = c("scientific_name" = "scientific_name"),
-  max_dist     = 2,
-  distance_col = "dist_sci"
-)
-
-matched_all <- bind_rows(matched_common, matched_sci) %>%
-  mutate(key_sci = coalesce(scientific_name.y, scientific_name.x)) %>%
-  arrange(event_id, key_sci, dist_common, dist_sci) %>%
-  distinct(event_id, key_sci, .keep_all = TRUE) %>%
-  rename(
-    common_name_obs       = common_name.x,
-    scientific_name_obs   = scientific_name.x,
-    common_name_ref       = common_name.y,
-    scientific_name_ref   = scientific_name.y
-  )
-
-# ---- Build important species table ----
-
-important_species_all <- matched_all %>%
+important_species_all <- obs_for_match %>%
+  inner_join(lookup_all,
+             by = c("common_name" = "common_name")) %>%
   transmute(
     event_id,
     region,
-    group,                                   # Bird / Mammal
-    common_name     = coalesce(common_name_ref, common_name_obs),
-    scientific_name = coalesce(scientific_name_ref, scientific_name_obs),
-    status          = status,                # Birds: Red/Amber; Mammals: EPS/Protected/SBL
+    group,                     # Bird / Mammal
+    common_name,
+    scientific_name = coalesce(scientific_name.y, scientific_name.x),
+    status,
     order,
-    family
+    family,
+    individualCount
   )
 
-# Optional quick QA
-# important_species_all %>% filter(group == "Bird", status == "Green") %>% distinct(common_name)  # should be empty
-# important_species_all %>% filter(group == "Mammal") %>% count(status, sort = TRUE)
-# assoc %>% anti_join(lookup_all, by = c("common_name","scientific_name")) %>% distinct(common_name, scientific_name)
 
 # ---- Setup: important-only dataset for plots ----
 
-# EcIA-ready plots use only important species (Birds: Red/Amber; Mammals: EPS/Protected/SBL)
 if (requireNamespace("patchwork", quietly = TRUE)) {
   library(patchwork)
 }
 
-# Exclude out-of-boundary events if event_id encodes this
 dat <- important_species_all %>%
-  filter(!str_detect(tolower(event_id), "\\boob\\b"))
-
-# Consistent ordering and labels
-dat <- dat %>%
+  filter(!str_detect(tolower(event_id), "\\boob\\b")) %>%
   mutate(
     group = factor(group, levels = c("Bird","Mammal")),
     region = factor(region),
-    species_label = str_to_title(common_name)  # nicer labels for plots
+    species_label = str_to_title(common_name)  # human-friendly
   )
 
-# Palettes
 pal_region <- c("North" = "#E76F51", "South" = "#2A9D8F") %>%
-  { .[intersect(names(.), levels(dat$region))] } # keep only present regions
+  { .[intersect(names(.), levels(dat$region))] }
 pal_bocc   <- c("Red" = "#C1121F", "Amber" = "#FFB000")
 
 theme_ecia <- function(base_size = 11) {
@@ -957,10 +1042,10 @@ theme_ecia <- function(base_size = 11) {
     )
 }
 
-# ---- Plot: Richness (important only) ----
+# ---- Plot: Richness (important only, by common name) ----
 
 richness <- dat %>%
-  distinct(region, group, scientific_name) %>%
+  distinct(region, group, species_label) %>%
   count(region, group, name = "n_species") %>%
   group_by(region) %>%
   mutate(pct = n_species / sum(n_species)) %>%
@@ -977,7 +1062,7 @@ fig_richnessimportant <- ggplot(richness, aes(x = region, y = n_species, fill = 
     limits = c(0, max(richness$n_species) * 1.15)
   ) +
   labs(
-    title = "Species richness by region and group (important only)",
+    title = "Important species richness by region and group",
     x = "Region",
     y = "Number of important species",
     fill = "Group"
@@ -995,13 +1080,13 @@ fig_richnessimportant <- ggplot(richness, aes(x = region, y = n_species, fill = 
 
 fig_richnessimportant
 
-
-# ---- Plot: Abundance (important only) ----
+# ---- Plot: Abundance (important only – TRUE abundance) ----
 
 top_n_per_group <- 10
 
 abund_species <- dat %>%
-  count(group, region, species_label, name = "n_records") %>%
+  group_by(group, region, species_label) %>%
+  summarise(n_records = sum(individualCount, na.rm = TRUE), .groups = "drop") %>%
   group_by(group, species_label) %>%
   mutate(total = sum(n_records)) %>%
   ungroup() %>%
@@ -1018,8 +1103,8 @@ fig_abundanceimportant <- ggplot(abund_species, aes(x = n_records, y = species_l
   scale_fill_manual(values = pal_region) +
   scale_x_continuous(expand = expansion(mult = c(0, .1))) +
   labs(
-    title = "Abundance (record count) by species and region (important only)",
-    x = "Number of important records",
+    title = "Abundance of important species by region",
+    x = "Total individuals (summed individualCount)",
     y = "Species",
     fill = "Region"
   ) +
@@ -1033,28 +1118,23 @@ fig_abundanceimportant <- ggplot(abund_species, aes(x = n_records, y = species_l
 
 fig_abundanceimportant
 
-# ---- Plot: Heatmap (important only) ----
+# ---- Plot: Heatmap (important only – TRUE abundance) ----
 
-# Add species-level conservation category
 species_status <- dat %>%
   mutate(category = case_when(
-    # Birds: BoCC
     group == "Bird" & status %in% c("Red", "Amber") ~ status,
     group == "Bird"                                 ~ "Other",
-    
-    # Mammals: protection categories
     group == "Mammal" & str_detect(status, regex("EPS", ignore_case = TRUE)) ~ "EPS",
     group == "Mammal" & str_detect(status, regex("Protected|WCA|PBA", ignore_case = TRUE)) ~ "Protected",
     group == "Mammal" & str_detect(status, regex("SBL", ignore_case = TRUE)) ~ "SBL Priority",
     group == "Mammal" ~ "Other",
-    
     TRUE ~ "Other"
   )) %>%
   distinct(group, species_label, category)
 
-# Build heatmap data with conservation category attached
 heat <- dat %>%
-  count(group, species_label, region, name = "n_records") %>%
+  group_by(group, species_label, region) %>%
+  summarise(n_records = sum(individualCount, na.rm = TRUE), .groups = "drop") %>%
   group_by(group, species_label) %>%
   mutate(total = sum(n_records)) %>%
   ungroup() %>%
@@ -1067,7 +1147,6 @@ heat <- dat %>%
     )
   )
 
-# Unified palette
 pal_comp <- c(
   "Amber"        = "#FFB000",
   "Red"          = "#C1121F",
@@ -1079,7 +1158,7 @@ pal_comp <- c(
 
 fig_heatmapimportant <- ggplot(heat, aes(x = region, y = species_label)) +
   geom_tile(aes(fill = category),
-            color = "grey80",  # slightly darker borders for clarity
+            color = "grey80",
             linewidth = 0.35) +
   geom_text(aes(label = n_records),
             color = "black",
@@ -1088,49 +1167,38 @@ fig_heatmapimportant <- ggplot(heat, aes(x = region, y = species_label)) +
   facet_wrap(~ group, scales = "free_y", ncol = 1, strip.position = "top") +
   scale_fill_manual(values = pal_comp, name = "Category") +
   labs(
-    title = "Species–region heatmap of important records",
-    subtitle = "Tile colour indicates conservation/protection category; numbers show important record counts",
+    title = "Species–region heatmap of important abundance",
+    subtitle = "Tile colour shows conservation/protection; numbers are summed individualCount",
     x = "Region",
     y = "Species"
   ) +
   theme_ecia() +
   theme(
-    # Axis clarity
     axis.line.x = element_line(colour = "black", linewidth = 0.4),
     axis.line.y = element_line(colour = "black", linewidth = 0.4),
     axis.ticks = element_line(colour = "black"),
-    
-    # Label clarity
     axis.text.x = element_text(angle = 45, hjust = 1, size = 10, colour = "black"),
     axis.text.y = element_text(size = 10, colour = "black"),
     axis.title.x = element_text(size = 11, face = "bold"),
     axis.title.y = element_text(size = 11, face = "bold"),
-    
-    # Facet spacing and layout
     panel.spacing.y = unit(1.2, "lines"),
     strip.text = element_text(size = 11, face = "bold"),
-    
-    # Titles
     plot.title = element_text(size = 14, face = "bold"),
     plot.subtitle = element_text(size = 11, margin = margin(b = 10)),
-    
-    # Legend
     legend.position = "right",
     legend.title = element_text(size = 10, face = "bold"),
     legend.text  = element_text(size = 9),
-    
-    # Margins
     plot.margin = margin(10, 15, 10, 10)
   )
 
 fig_heatmapimportant
 
-
-# ---- Plot: Bird BoCC composition (important only) ----
+# ---- Plot: Bird BoCC composition (richness, not abundance) ----
 
 birds_comp_counts <- dat %>%
   filter(group == "Bird", status %in% c("Red","Amber")) %>%
-  mutate(status = factor(status, levels = c("Amber","Red"))) %>%  # Amber at bottom, Red on top
+  mutate(status = factor(status, levels = c("Amber","Red"))) %>%
+  distinct(region, status, species_label) %>%   # richness by common name
   count(region, status, name = "n") %>%
   group_by(region) %>%
   mutate(total = sum(n)) %>%
@@ -1144,20 +1212,20 @@ fig_bocc_comp_counts <- ggplot(birds_comp_counts, aes(region, n, fill = status))
   ) +
   geom_text(
     data = distinct(birds_comp_counts, region, total),
-    aes(region, total, label = paste0("Total: ", total)),
+    aes(region, total, label = paste0("Total species: ", total)),
     vjust = -0.5, size = 3.2, fontface = "bold", inherit.aes = FALSE
   ) +
   scale_fill_manual(values = pal_bocc) +
   scale_y_continuous(expand = expansion(mult = c(0, .1))) +
   labs(
-    title = "Bird BoCC status by region (important only, stacked counts)",
-    x = "Region", y = "Number of important bird records", fill = "BoCC status"
+    title = "Important bird species by BoCC status and region",
+    x = "Region", y = "Number of important bird species", fill = "BoCC status"
   ) +
   theme_ecia()
 
 fig_bocc_comp_counts
 
-# ---- Plot: Mammal protection composition (important only) ----
+# ---- Plot: Mammal protection composition (richness, not abundance) ----
 
 mammals_comp_counts <- dat %>%
   filter(group == "Mammal") %>%
@@ -1168,6 +1236,7 @@ mammals_comp_counts <- dat %>%
     TRUE ~ status
   )) %>%
   mutate(protection = factor(protection, levels = c("SBL Priority","Protected","EPS"))) %>%
+  distinct(region, protection, species_label) %>%
   count(region, protection, name = "n") %>%
   group_by(region) %>%
   mutate(total = sum(n)) %>%
@@ -1183,29 +1252,28 @@ fig_mammal_comp_counts <- ggplot(mammals_comp_counts, aes(region, n, fill = prot
   ) +
   geom_text(
     data = distinct(mammals_comp_counts, region, total),
-    aes(region, total, label = paste0("Total: ", total)),
+    aes(region, total, label = paste0("Total species: ", total)),
     vjust = -0.5, size = 3.2, fontface = "bold", inherit.aes = FALSE
   ) +
   scale_fill_manual(values = pal_protect) +
   scale_y_continuous(expand = expansion(mult = c(0, .1))) +
   labs(
-    title = "Mammal protection category by region (important only, stacked counts)",
-    x = "Region", y = "Number of important mammal records", fill = "Category"
+    title = "Important mammal species by protection category and region",
+    x = "Region", y = "Number of important mammal species", fill = "Category"
   ) +
   theme_ecia()
 
 fig_mammal_comp_counts
 
-# ---- Plot: Combined composition (important only) ----
+# ---- Combined composition (richness) ----
 
-# Build bird composition (Red/Amber)
-birds_comp_counts <- dat %>%
+birds_comp_counts2 <- dat %>%
   filter(group == "Bird", status %in% c("Red","Amber")) %>%
-  mutate(category = factor(status, levels = c("Amber","Red"))) %>%  # Amber bottom, Red top
+  mutate(category = factor(status, levels = c("Amber","Red"))) %>%
+  distinct(group, region, category, species_label) %>%
   count(group, region, category, name = "n")
 
-# Build mammal composition (EPS / Protected / SBL)
-mammals_comp_counts <- dat %>%
+mammals_comp_counts2 <- dat %>%
   filter(group == "Mammal") %>%
   mutate(category = case_when(
     str_detect(status, regex("EPS", ignore_case = TRUE)) ~ "EPS",
@@ -1213,24 +1281,22 @@ mammals_comp_counts <- dat %>%
     str_detect(status, regex("SBL", ignore_case = TRUE)) ~ "SBL Priority",
     TRUE ~ status
   )) %>%
-  mutate(category = factor(category, levels = c("SBL Priority","Protected","EPS"))) %>% # SBL bottom, EPS top
+  mutate(category = factor(category, levels = c("SBL Priority","Protected","EPS"))) %>%
+  distinct(group, region, category, species_label) %>%
   count(group, region, category, name = "n")
 
-# Combine and order categories across both groups
-comp_all <- bind_rows(birds_comp_counts, mammals_comp_counts) %>%
+comp_all <- bind_rows(birds_comp_counts2, mammals_comp_counts2) %>%
   mutate(
     region = factor(region),
     group = factor(group, levels = c("Bird","Mammal")),
     category = factor(category, levels = c("SBL Priority","Protected","EPS","Amber","Red"))
   )
 
-# Totals per region in each facet
 comp_totals <- comp_all %>%
   group_by(group, region) %>%
   summarise(total = sum(n), .groups = "drop")
 
-# Unified palette for all categories
-pal_comp <- c(
+pal_comp2 <- c(
   "Amber" = "#FFB000",
   "Red" = "#C1121F",
   "EPS" = "#2D6A4F",
@@ -1241,7 +1307,7 @@ pal_comp <- c(
 fig_comp_combinedimportantbyregionandstatus <- ggplot(comp_all, aes(region, n, fill = category)) +
   geom_col(
     width = 0.7,
-    color = "grey90",        # clearer bar edges
+    color = "grey90",
     linewidth = 0.3
   ) +
   geom_text(
@@ -1253,58 +1319,47 @@ fig_comp_combinedimportantbyregionandstatus <- ggplot(comp_all, aes(region, n, f
   ) +
   geom_text(
     data = comp_totals,
-    aes(region, total, label = paste0("Total: ", total)),
+    aes(region, total, label = paste0("Total species: ", total)),
     vjust = -0.6,
     size = 3.4,
     fontface = "bold",
     inherit.aes = FALSE
   ) +
   facet_wrap(~ group, ncol = 2, scales = "fixed") +
-  scale_fill_manual(values = pal_comp, drop = FALSE) +
+  scale_fill_manual(values = pal_comp2, drop = FALSE) +
   scale_y_continuous(
     expand = expansion(mult = c(0, 0.12))
   ) +
   labs(
-    title = "Composition of important records by region (Bird BoCC and Mammal protection)",
+    title = "Composition of important species by region",
+    subtitle = "Richness of species by conservation/protection category",
     x = "Region",
-    y = "Number of important records",
+    y = "Number of important species",
     fill = "Category"
   ) +
   theme_ecia() +
   theme(
-    # clearer axes
     axis.line = element_line(colour = "black", linewidth = 0.4),
     axis.ticks = element_line(colour = "black"),
-    
-    # axis text and titles
     axis.text.x = element_text(angle = 45, hjust = 1, size = 10, colour = "black"),
     axis.text.y = element_text(size = 10, colour = "black"),
     axis.title = element_text(size = 11, face = "bold"),
-    
-    # facet labels
     strip.text = element_text(size = 11, face = "bold"),
-    
-    # title
     plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
-    
-    # legend
     legend.title = element_text(size = 10, face = "bold"),
     legend.text = element_text(size = 9),
-    
     plot.margin = margin(10, 15, 10, 10)
   )
 
 fig_comp_combinedimportantbyregionandstatus
 
-
-
-
-
-
-#----plots for report----
+# ---- Plots for report ----
 p_rich_all
 p_diverge_final
+overall_abundance_plot
 fig_abundanceimportant
 fig_richnessimportant
 fig_heatmapimportant
 fig_comp_combinedimportantbyregionandstatus
+
+
