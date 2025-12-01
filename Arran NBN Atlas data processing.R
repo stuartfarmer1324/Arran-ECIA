@@ -6,7 +6,7 @@ library(stringr)
 
 #----Converting NBN output to CSVs----
 north_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/North species list.txt"
-south_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/South Species_list_NBN Atlas.txt"
+south_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/updated south candidate site.txt"
 out_dir    <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas"
 status_lookup <- file.path(out_dir, "status_lookup.csv")  # optional
 
@@ -16,13 +16,13 @@ read_nbn <- function(path, site_id) {
   
   if (!"lsid" %in% names(x)) stop("LSID column not found in: ", path)
   
-  lsid <- str_split_fixed(x$lsid %||% "", pattern = "\\|", n = 5) |> as_tibble()
+  lsid <- str_split_fixed(x$lsid %||% "", pattern = "//|", n = 5) |> as_tibble()
   names(lsid) <- c("lsid_sci_from_blob","nbn_key_from_blob","vernacular_from_blob","kingdom_from_blob","family_from_blob")
   x <- bind_cols(x, lsid)
   
   inv_raw <- x$invasive %||% ""
-  inv_n   <- suppressWarnings(as.integer(str_extract(inv_raw, "\\d+")))
-  inv_src <- str_match(inv_raw, '\\d+"?\\s*,\\s*"?([^"]*)"?$')[,2] |> na_if("")
+  inv_n   <- suppressWarnings(as.integer(str_extract(inv_raw, "//d+")))
+  inv_src <- str_match(inv_raw, '//d+"?//s*,//s*"?([^"]*)"?$')[,2] |> na_if("")
   
   x <- x |>
     mutate(
@@ -253,4 +253,73 @@ p_imp_abund_nbn <- ggplot(imp_abund, aes(importance_class, total_records, fill =
   theme(axis.text.x = element_text(angle = 20, hjust = 1))
 p_imp_abund_nbn
 
+
+
+
+
+
+#----Buffer data importing from NBN Atlas----
+# Paths to your four buffer exports (update the filenames if needed)
+north_500_path   <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/Terrestrial buffer North.txt"
+north_2000_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/ABUFN.txt"
+south_500_path  <- "C:/Users/stuar/Downloads/Species_list_20251121_1763693625121.txt"
+south_2000_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/ABUFS.txt"
+
+# Read using your existing parser
+north_500  <- read_nbn(north_500_path,  "North")
+north_2000 <- read_nbn(north_2000_path, "North")
+south_500  <- read_nbn(south_500_path,  "South")
+south_2000 <- read_nbn(south_2000_path, "South")
+
+# Filters
+filter_birds_bats <- function(df) {
+  df %>%
+    mutate(cls = tolower(coalesce(class, "")),
+           ord = tolower(coalesce(order, ""))) %>%
+    filter(cls == "aves" | ord == "chiroptera") %>%
+    select(-cls, -ord)
+}
+
+filter_terrestrial_animals <- function(df) {
+  df %>%
+    mutate(k   = tolower(coalesce(kingdom, "")),
+           cls = tolower(coalesce(class, "")),
+           ord = tolower(coalesce(order, ""))) %>%
+    filter(
+      k == "animalia",                 # animals only
+      cls != "aves",                   # exclude birds
+      ord != "chiroptera",             # exclude bats
+      !cls %in% c("actinopterygii","elasmobranchii") # exclude fish
+    ) %>%
+    select(-k, -cls, -ord)
+}
+
+# Apply filters and tag zones
+north_500_ter  <- filter_terrestrial_animals(north_500)  %>% mutate(zone = "500m_terrestrial")
+north_2000_bb  <- filter_birds_bats(north_2000)          %>% mutate(zone = "2000m_birds_bats")
+south_500_ter  <- filter_terrestrial_animals(south_500)  %>% mutate(zone = "500m_terrestrial")
+south_2000_bb  <- filter_birds_bats(south_2000)          %>% mutate(zone = "2000m_birds_bats")
+
+# Glue buffers per site
+nbn_north_buffers <- bind_rows(north_500_ter, north_2000_bb)
+nbn_south_buffers <- bind_rows(south_500_ter, south_2000_bb)
+
+# Optional: combine all and save
+nbn_buffers_all <- bind_rows(nbn_north_buffers, nbn_south_buffers) %>%
+  mutate(number_of_records = as.integer(number_of_records) %||% 0L)
+
+readr::write_csv(nbn_north_buffers, file.path(out_dir, "nbn_north_buffers_filtered.csv"))
+readr::write_csv(nbn_south_buffers, file.path(out_dir, "nbn_south_buffers_filtered.csv"))
+readr::write_csv(nbn_buffers_all,  file.path(out_dir, "nbn_buffers_all_filtered.csv"))
+
+# Quick checks
+nbn_buffers_all %>%
+  group_by(site_id, zone) %>%
+  summarise(
+    richness = n_distinct(scientific_name),
+    records  = sum(replace_na(number_of_records, 0L)),
+    .groups = "drop"
+  ) %>%
+  arrange(site_id, zone) %>%
+  print(n = Inf)
 
