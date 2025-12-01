@@ -69,21 +69,21 @@ assign_group <- function(df) {
       kng = tolower(kingdom),
       
       group = case_when(
-        # Birds
-        str_detect(sci, "anas|aegithalos|accipiter|acrocephalus|actitis|alauda|anthus|emberiza|falco|muscicapa|prunella|strix|turdus|corvus") ~ "Birds",
+        # Birds (broad-ish)
+        str_detect(sci, "anas|aegithalos|accipiter|acrocephalus|actitis|alauda|anthus|emberiza|falco|muscicapa|prunella|strix|turdus|corvus|motacilla|larus|rissa|sterna|haematopus|numenius|podiceps|ardea|egretta|hirundo|delichon|riparia") ~ "Birds",
         
         # Bats
         str_detect(sci, "pipistrell|myotis|plecotus|nyctalus|eptesicus") ~ "Bats",
         
-        # Mammals
-        str_detect(sci, "sciurus|vulpes|mustela|meles|oryctolagus|capreolus|sus|martes|arvicola|lutra|castor|felis|erinaceus|lepus") ~ "Mammals",
+        # Mammals (non-bat)
+        str_detect(sci, "sciurus|vulpes|mustela|meles|oryctolagus|capreolus|sus|martes|arvicola|lutra|castor|felis|erinaceus|lepus|cervus|phoca|halichoerus|phocoena|apodemus|myodes|sorex") ~ "Mammals",
         
         # Amphibians
         str_detect(sci, "bufo|rana|lissotriton|ichthyosaura|triturus") ~ "Amphibians",
         fam == "bufonidae" ~ "Amphibians",
         
         # Reptiles
-        str_detect(sci, "natrix|vipera") ~ "Reptiles",
+        str_detect(sci, "natrix|vipera|zootoca|lacerta") ~ "Reptiles",
         
         # Fish
         fam %in% c("salmonidae","gobiidae","anguillidae","gasterosteidae","pleuronectidae") ~ "Fish",
@@ -123,6 +123,7 @@ north2000_raw <- read_nbn(north_2000_path, "North")
 south2000_raw <- read_nbn(south_2000_path, "South")
 
 # ---- Filter Before Combining (zone rules) ----
+# 500 m: exclude Birds, Bats, Plants (as you originally intended)
 north500 <- assign_group(north500_raw) %>%
   filter(!group %in% c("Birds", "Bats", "Plants")) %>%
   mutate(zone = "500m", hillside = "North")
@@ -131,12 +132,13 @@ south500 <- assign_group(south500_raw) %>%
   filter(!group %in% c("Birds", "Bats", "Plants")) %>%
   mutate(zone = "500m", hillside = "South")
 
+# 2000 m: INCLUDE Birds & Bats (key fix so bats exist in AOI)
 north2000 <- assign_group(north2000_raw) %>%
-  filter(group == "Birds") %>%
+  filter(group %in% c("Birds", "Bats")) %>%
   mutate(zone = "2000m", hillside = "North")
 
 south2000 <- assign_group(south2000_raw) %>%
-  filter(group == "Birds") %>%
+  filter(group %in% c("Birds", "Bats")) %>%
   mutate(zone = "2000m", hillside = "South")
 
 # ---- Combine Cleaned Buffers ----
@@ -195,7 +197,6 @@ print(p3)
 # ---- BoCC5 Classifications ----
 bocc5_part1 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
-  
   # RED LIST
   "house sparrow", "passer domesticus", "Red", "Passeriformes", "Passeridae",
   "tree sparrow", "passer montanus", "Red", "Passeriformes", "Passeridae",
@@ -275,7 +276,6 @@ bocc5_part1 <- tribble(
 
 bocc5_part2 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
-  
   # Continue Amber-listed WADERS & GULLS
   "black-headed gull", "chroicocephalus ridibundus", "Amber", "Charadriiformes", "Laridae",
   "lesser black-backed gull", "larus fuscus", "Amber", "Charadriiformes", "Laridae",
@@ -379,7 +379,6 @@ bocc5_part2 <- tribble(
 
 bocc5_part3 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
-  
   # Continue GREEN LIST
   "goldcrest", "regulus regulus", "Green", "Passeriformes", "Regulidae",
   "pheasant", "phasianus colchicus", "Green", "Galliformes", "Phasianidae",
@@ -510,6 +509,7 @@ bocc5_for_importance <- bocc5 %>%
 # ---- Mammals: Protected Species List ----
 mammals_imp <- tribble(
   ~common_name,            ~scientific_name,           ~status,                    ~order,         ~family,
+  
   # EPS (Habitats Regulations)
   "otter",                 "lutra lutra",              "EPS (fully protected)",    "Carnivora",    "Mustelidae",
   "common pipistrelle",    "pipistrellus pipistrellus","EPS (fully protected)",   "Chiroptera",   "Vespertilionidae",
@@ -530,12 +530,62 @@ mammals_imp <- tribble(
   # SBL Priority
   "hedgehog",              "erinaceus europaeus",      "SBL Priority",             "Eulipotyphla", "Erinaceidae",
   "brown hare",            "lepus europaeus",          "SBL Priority",             "Lagomorpha",   "Leporidae"
-) %>%
+)
+
+# ---- Additional mammals for Arran ----
+mammals_imp_extra <- tribble(
+  ~common_name,            ~scientific_name,           ~status,                       ~order,          ~family,
+  
+  # ---- BATS ----
+  "daubenton's bat",       "myotis daubentonii",       "EPS (fully protected)",        "Chiroptera",    "Vespertilionidae",
+  "natterer's bat",        "myotis nattereri",         "EPS (fully protected)",        "Chiroptera",    "Vespertilionidae",
+  "whiskered bat",         "myotis mystacinus",        "EPS (fully protected)",        "Chiroptera",    "Vespertilionidae",
+  "brandt's bat",          "myotis brandtii",          "EPS (fully protected)",        "Chiroptera",    "Vespertilionidae",
+  
+  # ---- WIDER MAMMALS ----
+  "red deer",              "cervus elaphus",           "None",                         "Artiodactyla",  "Cervidae",
+  "roe deer",              "capreolus capreolus",      "None",                         "Artiodactyla",  "Cervidae",
+  "common seal",           "phoca vitulina",           "WCA S5 (disturbance)",         "Carnivora",     "Phocidae",
+  "grey seal",             "halichoerus grypus",       "WCA S5 (disturbance)",         "Carnivora",     "Phocidae",
+  "harbour porpoise",      "phocoena phocoena",        "EPS (fully protected)",        "Cetacea",       "Phocoenidae",
+  
+  # Mustelids
+  "weasel",                "mustela nivalis",          "None",                         "Carnivora",     "Mustelidae",
+  "stoat",                 "mustela erminea",          "None",                         "Carnivora",     "Mustelidae",
+  
+  # Small mammals
+  "wood mouse",            "apodemus sylvaticus",      "None",                         "Rodentia",      "Muridae",
+  "bank vole",             "myodes glareolus",         "None",                         "Rodentia",      "Cricetidae",
+  "common shrew",          "sorex araneus",            "None",                         "Eulipotyphla",  "Soricidae"
+)
+
+# ---- Harmonise and combine mammals ----
+mammals_imp_extra <- mammals_imp_extra %>%
   mutate(
     common_name     = tolower(common_name),
     scientific_name = tolower(scientific_name),
     group           = "Mammal",
     bocc_status     = NA_character_
+  )
+
+mammals_imp <- mammals_imp %>%
+  mutate(
+    common_name     = tolower(common_name),
+    scientific_name = tolower(scientific_name),
+    group           = "Mammal",
+    bocc_status     = NA_character_
+  )
+
+mammals_imp <- bind_rows(mammals_imp, mammals_imp_extra) %>%
+  distinct(common_name, .keep_all = TRUE) %>%
+  mutate(
+    # Normalise and collapse to EPS / Protected / Priority / NA (non-important)
+    status = case_when(
+      str_detect(status, regex("EPS", ignore_case = TRUE)) ~ "EPS",
+      str_detect(status, regex("WCA|PBA|Protected \\(Scotland\\)", ignore_case = TRUE)) ~ "Protected",
+      str_detect(status, regex("SBL|Priority", ignore_case = TRUE)) ~ "Priority",
+      TRUE ~ NA_character_
+    )
   )
 
 # ---- Important Species Lookup ----
@@ -549,10 +599,6 @@ important_birds <- bocc5_for_importance %>%
   select(common_name, scientific_name, status, group, order, family)
 
 important_mammals <- mammals_imp %>%
-  mutate(
-    scientific_name = tolower(str_squish(scientific_name)),
-    common_name     = tolower(str_squish(common_name))
-  ) %>%
   select(common_name, scientific_name, status, group, order, family)
 
 lookup_important <- bind_rows(important_birds, important_mammals) %>%
@@ -602,6 +648,7 @@ important_nbn <- buffers_clean %>%
     by = "scientific_name",
     suffix = c("_buf", "_imp")
   ) %>%
+  # Only keep species with a non-NA status (Red/Amber birds, EPS/Protected/Priority mammals)
   filter(!is.na(status)) %>%
   mutate(group = group_imp) %>%
   distinct(hillside, scientific_name_raw_buf, .keep_all = TRUE) %>%
@@ -643,78 +690,98 @@ print(p_imp2)
 
 head(important_nbn)
 
-
-
-
-#----extract birds & bats from important_nbn----
-avian_raw <- important_nbn %>%
-  filter(group %in% c("Bird","Mammal")) %>%   # mammals includes bats; we will separate
+# ---- FILTER ONLY IMPORTANT / PROTECTED MAMMALS & BATS ----
+important_clean <- important_nbn %>%
   mutate(
-    scientific_name_clean = clean_sci(scientific_name),
-    is_bat = str_detect(scientific_name_clean, 
-                        "pipistrell|myotis|plecotus|nyctalus|eptesicus")
+    sci_clean = clean_sci(scientific_name_raw_buf),
+    is_bat    = str_detect(sci_clean, "pipistrell|myotis|plecotus|nyctalus|eptesicus"),
+    is_bird   = group == "Bird",
+    is_mammal = group == "Mammal" & !is_bat
   )
 
-
-
-
-birds_classified <- avian_raw %>%
-  filter(group == "Bird") %>%
+# ---- 1. BIRDS ----
+birds_classified <- important_clean %>%
+  filter(is_bird) %>%
   left_join(
     bocc5 %>%
-      select(scientific_name, bocc_status) %>%
-      mutate(scientific_name = clean_sci(scientific_name)),
-    by = c("scientific_name_clean" = "scientific_name")
+      mutate(scientific_name = clean_sci(scientific_name)) %>%
+      select(scientific_name, bocc_status),
+    by = c("sci_clean" = "scientific_name")
   ) %>%
   mutate(
     classification = case_when(
       bocc_status %in% c("Red","Amber","Green") ~ bocc_status,
       TRUE ~ "Other"
+    ),
+    species = scientific_name_raw_buf
+  )
+
+
+# ---- 2 + 3. ALL IMPORTANT / PROTECTED MAMMALS (including bats) ----
+mammals_classified <- important_clean %>%
+  filter(group == "Mammal") %>%   # <--- includes bats now too
+  mutate(
+    classification = case_when(
+      status == "EPS"       ~ "EPS",
+      status == "Protected" ~ "Protected",
+      status == "Priority"  ~ "Priority",
+      TRUE ~ NA_character_
     )
-  )
+  ) %>%
+  filter(!is.na(classification)) %>%  # keep only important mammals
+  mutate(species = scientific_name_raw_buf)
 
-bats_classified <- avian_raw %>%
-  filter(is_bat == TRUE) %>%
-  mutate(
-    classification = "EPS",
-    bocc_status = "EPS"
-  )
-pal_avian <- c(
-  "EPS"   = "#2D6A4F",
-  "Red"   = "#C1121F",
-  "Amber" = "#FFB000",
-  "Green" = "#74C69D",
-  "Other" = "grey80"
+
+# ---- COLOUR PALETTE ----
+pal_all <- c(
+  "EPS"       = "#2D6A4F",
+  "Protected" = "#1B4332",
+  "Priority"  = "#40916C",
+  "Red"       = "#C1121F",
+  "Amber"     = "#FFB000",
+  "Green"     = "#74C69D",
+  "Other"     = "grey80"
 )
-birds_plot_df <- birds_classified %>%
-  mutate(
-    species = scientific_name,
-    classification = factor(classification,
-                            levels = c("Red","Amber","Green","Other"))
-  )
 
+
+
+# ---- BIRD HEATMAP ----
 fig_birds_heatmap <- ggplot(
-  birds_plot_df,
+  birds_classified,
   aes(
-    x = hillside,
-    y = reorder(species, hillside),
+    x   = hillside,
+    y   = factor(species),
     fill = classification
   )
 ) +
   geom_tile(color = "white", linewidth = 0.4) +
-  scale_fill_manual(values = pal_avian, name = "Status") +
+  scale_fill_manual(values = pal_all) +
   labs(
-    title = "Bird Species by Hillside (North vs South)",
+    title = "Bird Species by Hillside (Important)",
     x = "Hillside",
     y = "Bird Species"
   ) +
-  theme_minimal() +
-  theme(
-    axis.text.y = element_text(size = 7),
-    axis.text.x = element_text(size = 12, face = "bold"),
-    plot.title = element_text(size = 14, face = "bold"),
-    panel.grid = element_blank()
+  theme_minimal()
+
+# ---- MAMMAL HEATMAP (BATS INCLUDED) ----
+fig_mammals_heatmap <- ggplot(
+  mammals_classified,
+  aes(
+    x   = hillside,
+    y   = factor(species),
+    fill = classification
   )
+) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_manual(values = pal_all) +
+  labs(
+    title = "Protected & Priority Mammals (Including Bats)",
+    x = "Hillside",
+    y = "Mammal Species"
+  ) +
+  theme_minimal()
+
 
 fig_birds_heatmap
+fig_mammals_heatmap 
 
