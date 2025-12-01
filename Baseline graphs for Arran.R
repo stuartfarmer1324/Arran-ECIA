@@ -1,42 +1,65 @@
-############################################################
-# ARRAN BIODIVERSITY ANALYSIS + IMPORTANT SPECIES PIPELINE
-# - Uses associatedoccurences.csv as sole data source
-# - Does genus→synthetic species imputation ONLY when species missing
-# - Produces:
-#   * All-taxa richness / divergence / rank–abundance etc.
-#   * Important species (BoCC birds + protected/priority mammals)
-############################################################
-#install.packages("ggbreak")
+# Arran biodiversity analysis + important species pipeline
+# Uses associatedoccurences.csv as the data source
+# Imputes genus-only records to synthetic species without altering real species
+# Produces all-taxa summaries plus important-species extracts
+
 # ---- Libraries ----
+
+required_pkgs <- c("tidyverse", "stringr", "fuzzyjoin", "stringdist", "forcats", "scales")
+missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+
+if (length(missing_pkgs) > 0) {
+  stop(
+    "Install the missing packages before running: ",
+    paste(missing_pkgs, collapse = ", ")
+  )
+}
+
 library(tidyverse)
 library(stringr)
 library(fuzzyjoin)
 library(stringdist)
 library(forcats)
 library(scales)
-library(ggbreak)
-
 # library(patchwork) # uncomment if you want multipanel layouts
 
-############################################################
-# 1. LOAD ASSOCIATED OCCURRENCES (RAW)
-############################################################
+# ---- Load occurrences ----
 
-occurs_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/associatedoccurences.csv"
-stopifnot(file.exists(occurs_path))
+# Point to your occurrences CSV. If missing, fall back to a tiny demo dataset so
+# the script still runs for testing/documentation.
+occurs_path <- Sys.getenv(
+  "OCCURS_PATH",
+  unset = "C:/Users/stuar/Documents/Masters/Arran/Data/associatedoccurences.csv"
+)
 
-assoc <- readr::read_csv(occurs_path, show_col_types = FALSE)
+if (file.exists(occurs_path)) {
+  message("Loading occurrences from: ", occurs_path)
+  assoc <- readr::read_csv(occurs_path, show_col_types = FALSE)
+} else {
+  message(
+    "Occurrences file not found at ", occurs_path, "; using built-in demo data. ",
+    "Set OCCURS_PATH to your CSV to run with the real survey."
+  )
+  
+  assoc <- tibble(
+    eventID        = c("N1B", "S1B", "N2M", "S2M", "N3P", "S3P", "N4T", "S4A"),
+    Commonme       = c("curlew", "curlew", "otter", "otter",
+                       "scots pine", "scots pine", "bumblebee", "azure damselfly"),
+    scientificme   = c("Numenius arquata", "Numenius arquata", "Lutra lutra", "Lutra lutra",
+                       "Pinus sylvestris", "Pinus sylvestris", "Bombus sp.", "Coenagrion puella"),
+    kingdom        = c("Animalia", "Animalia", "Animalia", "Animalia",
+                       "Plantae", "Plantae", "Animalia", "Animalia"),
+    Order          = c("Charadriiformes", "Charadriiformes", "Carnivora", "Carnivora",
+                       "Pinales", "Pinales", "Hymenoptera", "Odonata"),
+    taxonRank      = rep("Species", 8),
+    occurrenceStatus = rep("Present", 8),
+    basisOfRecord  = c("HumanObservation", "HumanObservation", "HumanObservation",
+                       "HumanObservation", "HumanObservation", "HumanObservation",
+                       "HumanObservation", "HumanObservation")
+  )
+}
 
-# Check the original column names once (optional)
-# print(names(assoc))
-
-############################################################
-# 2. STANDARDISE CORE FIELDS
-############################################################
-# We assume the following columns exist in the CSV:
-#   eventID, Commonme, scientificme, kingdom, Order, taxonRank,
-#   occurrenceStatus, basisOfRecord
-# If names differ, adjust the rename() and mutate() blocks.
+# ---- Standardise fields ----
 
 assoc <- assoc %>%
   rename(
@@ -64,12 +87,12 @@ assoc <- assoc %>%
     )
   )
 
-############################################################
-# 3. GENUS→SYNTHETIC SPECIES IMPUTATION (ONLY WHEN SPECIES MISSING)
-############################################################
+# ---- Genus → synthetic species imputation ----
 
 # Helper: identify if scientific name looks like a proper binomial
 is_binomial <- function(x) {
+  # Returns TRUE when a string looks like a species binomial and FALSE for
+  # genus-only / "sp." style labels (keeps later logic clean and readable).
   x <- str_trim(x)
   pat <- "^[A-Z][a-z]+\\s+[a-z][a-z\\-]+$"
   good <- str_detect(x, pat)
@@ -104,12 +127,7 @@ assoc <- assoc %>%
     )
   )
 
-# IMPORTANT: This does *not* overwrite real species, it only assigns synthetic
-# species for genus-only / “sp.” style records via taxon_unit.
-
-############################################################
-# 4. FILTER FOR ANALYSIS (PRESENT + KNOWN REGION)
-############################################################
+# ---- Filter occurrences for analysis ----
 
 assoc_use <- assoc %>%
   filter(
@@ -117,9 +135,7 @@ assoc_use <- assoc %>%
     !is.na(region)
   )
 
-############################################################
-# 5. GROUP ASSIGNMENT (Birds, Bats, Mammals, Plants, Inverts, Other)
-############################################################
+# ---- Group assignment ----
 
 mammal_orders      <- c("artiodactyla", "carnivora", "rodentia",
                         "lagomorpha", "eulipotyphla", "chiroptera")
@@ -180,14 +196,12 @@ oc_use <- assoc_use %>%
     !str_detect(taxon_unit, regex("^No records|Unidentified", ignore_case = TRUE))
   )
 
-############################################################
-# 6. ALL-TAXA RICHNESS / ABUNDANCE / JACCARD PLOTS
-############################################################
+# ---- All-taxa plots (not important-only) ----
 
 group_levels <- c("Overall","Plants","Birds","Mammals","Bats",
                   "Terrestrial invertebrates","Aquatic invertebrates")
 
-# ---- 6.1 Richness by group (+ overall), North vs South ----
+# 6.1 Richness by group (+ overall), North vs South
 rich_by_group <- oc_use %>%
   group_by(group, hillside) %>%
   summarise(n_species = n_distinct(taxon_unit), .groups = "drop")
@@ -205,103 +219,101 @@ plot_dat <- bind_rows(rich_by_group, rich_overall) %>%
   ) %>%
   arrange(group, hillside)
 
+# Prepare a wide summary for the diverging plot
+summ_diff <- plot_dat %>%
+  select(group, hillside, n_species) %>%
+  tidyr::complete(group, hillside, fill = list(n_species = 0)) %>%
+  tidyr::pivot_wider(names_from = hillside, values_from = n_species,
+                     values_fill = 0) %>%
+  mutate(group = factor(group, levels = group_levels))
+
+hillside_dodge <- position_dodge(width = 0.75)
+
 p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
-  geom_col(position = position_dodge(width = 0.75), width = 0.7, colour = "white") +
+  geom_col(position = hillside_dodge, width = 0.7, colour = "white") +
   geom_text(aes(label = n_species),
-            position = position_dodge(width = 0.75),
+            position = hillside_dodge,
             hjust = -0.2, size = 3.8, colour = "grey20") +
   scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
   labs(
     title    = "Richness by sampled group and hillside",
     subtitle = "Distinct species per hillside (genus-only records imputed to synthetic species)",
     x = "Richness (species)",
-    y = NULL,
+    y = "Group",
     fill = NULL
   ) +
   theme_minimal(base_size = 12) +
   theme(
-    legend.position       = "top",
-    panel.grid.major.y    = element_blank()
+    legend.position    = "top",
+    panel.grid.major.y = element_blank(),
+    
+    # AXIS LINES + TICKS
+    axis.line.x  = element_line(colour = "black", linewidth = 0.6),
+    axis.line.y  = element_line(colour = "black", linewidth = 0.6),
+    axis.ticks.x = element_line(colour = "black"),
+    axis.ticks.y = element_line(colour = "black")
   )
+
 
 p_rich_all
 
-# ---- 6.2 Diverging richness plot (South − North) by group ----
+
+# 6.2 Diverging richness plot (South − North) by group
 df_div <- summ_diff %>%
   mutate(
     diff = South - North,
     abs_diff = abs(diff),
     direction = ifelse(diff > 0, "South",
                        ifelse(diff < 0, "North", "Tie")),
-    # first reorder normally by diff…
     group = fct_reorder(group, diff),
-    # …then force "Overall" to the bottom
     group = fct_relevel(group, "Overall", after = Inf)
   )
-
 
 # ensure ±6 appear on axis
 auto_breaks <- scales::pretty_breaks(5)(range(df_div$diff))
 forced_breaks <- sort(unique(c(auto_breaks, -6, 6)))
 
-
 p_diverge_final <- ggplot(df_div, aes(y = group)) +
-  
-  # centre line
   geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
-  
-  # diverging bars (diff gives direction)
   geom_col(aes(x = diff, fill = direction),
            width = 0.65, colour = "white") +
-  
-  # --- LEFT LABELS (North values) ---
   geom_text(
     data = df_div %>% filter(diff < 0),
     aes(x = diff - 0.25, label = paste0("N = ", North)),
     hjust = 1, size = 3.6, colour = "grey20"
   ) +
-  
-  # --- RIGHT LABELS (South values) ---
   geom_text(
     data = df_div %>% filter(diff > 0),
     aes(x = diff + 0.25, label = paste0("S = ", South)),
     hjust = 0, size = 3.6, colour = "grey20"
   ) +
-  
-  # --- CENTRE VALUES (the opposite slope) ---
-  # North bar => show South at centre
   geom_text(
     data = df_div %>% filter(diff < 0),
     aes(x = 0.1, label = paste0("S = ", South)),
     hjust = 0, size = 3.4, colour = "grey40"
   ) +
-  # South bar => show North at centre
   geom_text(
     data = df_div %>% filter(diff > 0),
     aes(x = -0.1, label = paste0("N = ", North)),
     hjust = 1, size = 3.4, colour = "grey40"
   ) +
-  
   scale_fill_manual(values = c(
     "North" = "#74A9CF",
     "South" = "#A1D99B",
     "Tie"   = "grey80"
   )) +
-  
-  # ⭐ POSITIVE AXIS BOTH SIDES (ABS VALUES SHOWN)
   scale_x_continuous(
-    labels = abs,          # <- KEY: shows |value| instead of signed value
+    labels = abs,
     breaks = forced_breaks,
     expand = expansion(mult = c(0.12, 0.12))
   ) +
-  
   labs(
-    title = "Richness difference between candidate sites(North - South)",
-    x = "Difference",
+    title = "Richness difference by group (South minus North)",
+    subtitle = "Positive bars = richer in South; negative bars = richer in North",
+    x = "Difference in richness (species)",
     y = "Group",
     fill = ""
   ) +
-  
   theme_minimal(base_size = 14) +
   theme(
     legend.position = "top",
@@ -310,7 +322,6 @@ p_diverge_final <- ggplot(df_div, aes(y = group)) +
     axis.text.x = element_text(size = 12),
     plot.title = element_text(size = 14, face = "bold"),
     plot.subtitle = element_text(size = 11, colour = "grey25"),
-    
     axis.line.x = element_line(colour = "grey40", linewidth = 0.6),
     axis.ticks.x = element_line(colour = "grey40"),
     axis.line.y = element_line(colour = "grey40", linewidth = 0.6),
@@ -319,9 +330,7 @@ p_diverge_final <- ggplot(df_div, aes(y = group)) +
 
 p_diverge_final
 
-
-
-# ---- 6.3 Rank–abundance across all species, per hillside ----
+# 6.3 Rank–abundance across all species, per hillside
 rank_abund_all <- oc_use %>%
   count(hillside, taxon_unit, name = "records") %>%
   group_by(hillside) %>%
@@ -345,7 +354,7 @@ p_rank_all <- ggplot(rank_abund_all, aes(x = rank, y = records, colour = hillsid
 
 p_rank_all
 
-# ---- 6.4 Similarity (Jaccard) between hillsides by group ----
+# 6.4 Similarity (Jaccard) between hillsides by group
 jaccard_by_group <- oc_use %>%
   distinct(group, hillside, taxon_unit) %>%
   group_by(group) %>%
@@ -378,8 +387,25 @@ p_jaccard_all <- ggplot(jaccard_by_group,
 
 p_jaccard_all
 
-# ---- 6.5 Per-group abundance plots (optional helpers) ----
+# 6.5 Per-group abundance plots (helper function, all taxa)
+
 grouped_species_abundance <- function(df, grp_label, top_n = Inf) {
+  
+  if (!"group" %in% names(df)) {
+    stop("Error: dataset does not contain a 'group' column.")
+  }
+  if (!grp_label %in% unique(df$group)) {
+    warning(paste0("Group '", grp_label, "' not found. Available groups: ",
+                   paste(unique(df$group), collapse = ", ")))
+    return(invisible(NULL))
+  }
+  if (!"taxon_unit" %in% names(df)) {
+    stop("Error: dataset does not contain 'taxon_unit'.")
+  }
+  if (!"hillside" %in% names(df)) {
+    stop("Error: dataset does not contain 'hillside'.")
+  }
+  
   df_grp <- df %>% filter(group == grp_label)
   if (nrow(df_grp) == 0) return(invisible(NULL))
   
@@ -408,11 +434,14 @@ grouped_species_abundance <- function(df, grp_label, top_n = Inf) {
   dat <- dat %>%
     mutate(taxon_unit = reorder(taxon_unit, total_records))
   
+  if (!exists("hillside_dodge")) {
+    hillside_dodge <- position_dodge(width = 0.75)
+  }
+  
   ggplot(dat, aes(x = taxon_unit, y = records, fill = hillside)) +
-    geom_col(position = position_dodge(width = 0.75),
-             width = 0.7, colour = "white") +
+    geom_col(position = hillside_dodge, width = 0.7, colour = "white") +
     geom_text(aes(label = records),
-              position = position_dodge(width = 0.75),
+              position = hillside_dodge,
               hjust = -0.1, size = 3, colour = "grey25") +
     coord_flip(clip = "off") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
@@ -423,18 +452,22 @@ grouped_species_abundance <- function(df, grp_label, top_n = Inf) {
       fill  = NULL
     ) +
     theme_minimal(base_size = 12) +
-    theme(legend.position = "top")
+    theme(
+      legend.position = "top",
+      axis.line.x = element_line(colour = "black", linewidth = 0.6),
+      axis.line.y = element_line(colour = "black", linewidth = 0.6),
+      axis.ticks.x = element_line(colour = "black"),
+      axis.ticks.y = element_line(colour = "black")
+    )
 }
 
-grouped_species_abundance
+
 # Example call per group (comment/uncomment as needed)
 # for (g in c("Birds","Mammals","Bats","Terrestrial invertebrates","Aquatic invertebrates","Plants")) {
-#   if (g %in% unique(oc_use$group)) print(make_species_abundance(oc_use, g))
+#   if (g %in% unique(oc_use$group)) print(grouped_species_abundance(oc_use, g))
 # }
 
-############################################################
-# 1) BIRDS: YOUR SOURCE TABLES (as provided), THEN WE FIX MISLABELS
-############################################################
+# ---- Birds: BoCC5 lists ----
 
 bocc5_part1 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
@@ -499,7 +532,6 @@ bocc5_part1 <- tribble(
   "magpie", "pica pica", "Amber", "Passeriformes", "Corvidae",
   "jay", "garrulus glandarius", "Amber", "Passeriformes", "Corvidae",
   
-  # Continue…
   "wood pigeon", "columba palumbus", "Amber", "Columbiformes", "Columbidae",
   "stock dove", "columba oenas", "Amber", "Columbiformes", "Columbidae",
   "collared dove", "streptopelia decaocto", "Amber", "Columbiformes", "Columbidae",
@@ -753,9 +785,7 @@ bocc5 <- bocc5 %>%
 # Keep only Red/Amber birds as "important" for EcIA
 bocc5_for_importance <- bocc5 %>% filter(bocc_status %in% c("Red","Amber"))
 
-############################################################
-# 2) MAMMALS: Scotland EPS/protected/priority list for EcIA
-############################################################
+# ---- Mammals: protected species list ----
 
 mammals_imp <- tribble(
   ~common_name,            ~scientific_name,          ~status,                    ~order,         ~family,
@@ -800,9 +830,7 @@ mammals_imp <- tribble(
 #   group = "Mammal"
 # )
 
-############################################################
-# 3) BUILD LOOKUP (Birds Red/Amber only + Protected/priority mammals)
-############################################################
+# ---- Build important-species lookup ----
 
 lookup_all <- bind_rows(
   bocc5_for_importance %>%
@@ -818,9 +846,7 @@ lookup_all <- bind_rows(
   ) %>%
   distinct(common_name, scientific_name, .keep_all = TRUE)
 
-############################################################
-# 4) NORMALISE OBSERVED NAMES; OPTIONAL SYNONYMS
-############################################################
+# ---- Normalise observed names ----
 
 assoc <- assoc %>%
   mutate(
@@ -839,21 +865,26 @@ assoc <- assoc %>%
   mutate(common_name = coalesce(common_name_std, common_name)) %>%
   select(-common_name_std)
 
-############################################################
-# 5) FUZZY MATCH (COMMON and SCIENTIFIC), COMBINE, DEDUPE
-############################################################
+# ---- Fuzzy matching ----
+
+# Filter out NA names so fuzzyjoin doesn't choke on them
+assoc_clean  <- assoc %>% dplyr::filter(!is.na(common_name))
+lookup_clean <- lookup_all %>% dplyr::filter(!is.na(common_name))
 
 matched_common <- stringdist_inner_join(
-  assoc,
-  lookup_all,
+  assoc_clean,
+  lookup_clean,
   by = c("common_name" = "common_name"),
   max_dist     = 2,
   distance_col = "dist_common"
 )
 
+assoc_cleans  <- assoc %>% dplyr::filter(!is.na(scientific_name))
+lookup_cleans <- lookup_all %>% dplyr::filter(!is.na(scientific_name))
+
 matched_sci <- stringdist_inner_join(
-  assoc,
-  lookup_all,
+  assoc_cleans,
+  lookup_cleans,
   by = c("scientific_name" = "scientific_name"),
   max_dist     = 2,
   distance_col = "dist_sci"
@@ -870,9 +901,7 @@ matched_all <- bind_rows(matched_common, matched_sci) %>%
     scientific_name_ref   = scientific_name.y
   )
 
-############################################################
-# 6) FINAL IMPORTANT SPECIES OBJECT (Birds: Red/Amber; Mammals: EPS/Protected/SBL)
-############################################################
+# ---- Build important species table ----
 
 important_species_all <- matched_all %>%
   transmute(
@@ -891,26 +920,12 @@ important_species_all <- matched_all %>%
 # important_species_all %>% filter(group == "Mammal") %>% count(status, sort = TRUE)
 # assoc %>% anti_join(lookup_all, by = c("common_name","scientific_name")) %>% distinct(common_name, scientific_name)
 
+# ---- Setup: important-only dataset for plots ----
 
-############################################################
-# 10. PLOTS
-############################################################
-# ==========================================================
-# EcIA-ready plots: richness, abundance, heatmap + 2 extras
-# Requires: important_species_all with columns:
-#   event_id, region, group (Bird/Mammal), common_name, scientific_name,
-#   status (Bird: Red/Amber; Mammal: EPS/Protected/SBL), order, family
-# ==========================================================
-
-library(tidyverse)
-library(scales)
-library(forcats)
-# install.packages("patchwork") # if needed
-library(patchwork)
-
-# ----------------------------
-# 0) General settings & helpers
-# ----------------------------
+# EcIA-ready plots use only important species (Birds: Red/Amber; Mammals: EPS/Protected/SBL)
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+}
 
 # Exclude out-of-boundary events if event_id encodes this
 dat <- important_species_all %>%
@@ -942,9 +957,7 @@ theme_ecia <- function(base_size = 11) {
     )
 }
 
-# -------------------------------------------------
-# 1) Species richness by region and group (bar + %)
-# -------------------------------------------------
+# ---- Plot: Richness (important only) ----
 
 richness <- dat %>%
   distinct(region, group, scientific_name) %>%
@@ -953,25 +966,38 @@ richness <- dat %>%
   mutate(pct = n_species / sum(n_species)) %>%
   ungroup()
 
-fig_richness <- ggplot(richness, aes(x = region, y = n_species, fill = group)) +
-  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+fig_richnessimportant <- ggplot(richness, aes(x = region, y = n_species, fill = group)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65) +
   geom_text(aes(label = n_species),
-            position = position_dodge(width = 0.8), vjust = -0.4, size = 3.2) +
+            position = position_dodge(width = 0.75),
+            vjust = -0.5, size = 3.5) +
   scale_fill_manual(values = c("Bird" = "#577590", "Mammal" = "#43AA8B")) +
-  scale_y_continuous(expand = expansion(mult = c(0, .1))) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.08)),
+    limits = c(0, max(richness$n_species) * 1.15)
+  ) +
   labs(
-    title = "Species richness by region and group",
+    title = "Species richness by region and group (important only)",
     x = "Region",
-    y = "Number of species",
+    y = "Number of important species",
     fill = "Group"
   ) +
-  theme_ecia()
-fig_richness
+  theme_ecia() +
+  theme(
+    axis.line = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks = element_line(colour = "black"),
+    axis.text = element_text(size = 11, colour = "black"),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+fig_richnessimportant
 
 
+# ---- Plot: Abundance (important only) ----
 
-# 2) Abundance by species (Cleveland bars; top-N)
-# -------------------------------------------------
 top_n_per_group <- 10
 
 abund_species <- dat %>%
@@ -984,7 +1010,7 @@ abund_species <- dat %>%
   ungroup() %>%
   mutate(species_label = fct_reorder(species_label, total))
 
-fig_abundance <- ggplot(abund_species, aes(x = n_records, y = species_label, fill = region)) +
+fig_abundanceimportant <- ggplot(abund_species, aes(x = n_records, y = species_label, fill = region)) +
   geom_col(position = position_dodge(width = 0.8), width = 0.7) +
   geom_text(aes(label = n_records),
             position = position_dodge(width = 0.8), hjust = -0.2, size = 3) +
@@ -992,22 +1018,24 @@ fig_abundance <- ggplot(abund_species, aes(x = n_records, y = species_label, fil
   scale_fill_manual(values = pal_region) +
   scale_x_continuous(expand = expansion(mult = c(0, .1))) +
   labs(
-    title = "Abundance (record count) by species and region",
-    x = "Number of records",
+    title = "Abundance (record count) by species and region (important only)",
+    x = "Number of important records",
     y = "Species",
     fill = "Region"
   ) +
-  theme_ecia()
+  theme_ecia() +
+  theme(
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
 
+fig_abundanceimportant
 
-fig_abundance
+# ---- Plot: Heatmap (important only) ----
 
-
-# -------------------------------------------------
-# 3) Species–region heatmap (counts)
-# -------------------------------------------------
-
-# --- add species-level conservation category ---
+# Add species-level conservation category
 species_status <- dat %>%
   mutate(category = case_when(
     # Birds: BoCC
@@ -1024,7 +1052,7 @@ species_status <- dat %>%
   )) %>%
   distinct(group, species_label, category)
 
-# --- rebuild heatmap data with conservation category attached ---
+# Build heatmap data with conservation category attached
 heat <- dat %>%
   count(group, species_label, region, name = "n_records") %>%
   group_by(group, species_label) %>%
@@ -1039,7 +1067,7 @@ heat <- dat %>%
     )
   )
 
-# --- unified palette (add to your palette section if needed) ---
+# Unified palette
 pal_comp <- c(
   "Amber"        = "#FFB000",
   "Red"          = "#C1121F",
@@ -1049,38 +1077,56 @@ pal_comp <- c(
   "Other"        = "grey80"
 )
 
-# --- updated heatmap plot ---
-fig_heatmap <- ggplot(heat, aes(x = region, y = species_label)) +
-  geom_tile(aes(fill = category), color = "grey90", linewidth = 0.25) +
-  geom_text(aes(label = n_records), color = "black", size = 3.3, fontface = "bold") +
+fig_heatmapimportant <- ggplot(heat, aes(x = region, y = species_label)) +
+  geom_tile(aes(fill = category),
+            color = "grey80",  # slightly darker borders for clarity
+            linewidth = 0.35) +
+  geom_text(aes(label = n_records),
+            color = "black",
+            size = 3.6,
+            fontface = "bold") +
   facet_wrap(~ group, scales = "free_y", ncol = 1, strip.position = "top") +
   scale_fill_manual(values = pal_comp, name = "Category") +
   labs(
-    title = "Species–region heatmap of records",
-    subtitle = "Tile colour indicates conservation category; numbers show record counts",
+    title = "Species–region heatmap of important records",
+    subtitle = "Tile colour indicates conservation/protection category; numbers show important record counts",
     x = "Region",
     y = "Species"
   ) +
   theme_ecia() +
   theme(
+    # Axis clarity
+    axis.line.x = element_line(colour = "black", linewidth = 0.4),
+    axis.line.y = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks = element_line(colour = "black"),
+    
+    # Label clarity
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, colour = "black"),
+    axis.text.y = element_text(size = 10, colour = "black"),
+    axis.title.x = element_text(size = 11, face = "bold"),
+    axis.title.y = element_text(size = 11, face = "bold"),
+    
+    # Facet spacing and layout
+    panel.spacing.y = unit(1.2, "lines"),
+    strip.text = element_text(size = 11, face = "bold"),
+    
+    # Titles
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11, margin = margin(b = 10)),
+    
+    # Legend
     legend.position = "right",
     legend.title = element_text(size = 10, face = "bold"),
     legend.text  = element_text(size = 9),
-    panel.spacing.y = unit(1.2, "lines"),
-    strip.text = element_text(size = 11, face = "bold"),
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
-    axis.text.y = element_text(size = 9),
-    plot.title = element_text(size = 14, face = "bold"),
-    plot.subtitle = element_text(size = 11, margin = margin(b = 10)),
+    
+    # Margins
     plot.margin = margin(10, 15, 10, 10)
   )
 
-fig_heatmap
+fig_heatmapimportant
 
 
-# -------------------------------------------------
-# 4) Bird BoCC composition (Red vs Amber) by region — STACKED COUNTS
-# -------------------------------------------------
+# ---- Plot: Bird BoCC composition (important only) ----
 
 birds_comp_counts <- dat %>%
   filter(group == "Bird", status %in% c("Red","Amber")) %>%
@@ -1092,12 +1138,10 @@ birds_comp_counts <- dat %>%
 
 fig_bocc_comp_counts <- ggplot(birds_comp_counts, aes(region, n, fill = status)) +
   geom_col(width = 0.7, color = "white") +
-  # label each segment with its count (hidden for zeros)
   geom_text(
     aes(label = ifelse(n > 0, n, "")),
     position = position_stack(vjust = 0.5), size = 3.2, color = "black"
   ) +
-  # optional total on top of each bar
   geom_text(
     data = distinct(birds_comp_counts, region, total),
     aes(region, total, label = paste0("Total: ", total)),
@@ -1106,14 +1150,14 @@ fig_bocc_comp_counts <- ggplot(birds_comp_counts, aes(region, n, fill = status))
   scale_fill_manual(values = pal_bocc) +
   scale_y_continuous(expand = expansion(mult = c(0, .1))) +
   labs(
-    title = "Bird BoCC status by region (stacked counts)",
-    x = "Region", y = "Number of records", fill = "BoCC status"
+    title = "Bird BoCC status by region (important only, stacked counts)",
+    x = "Region", y = "Number of important bird records", fill = "BoCC status"
   ) +
   theme_ecia()
+
 fig_bocc_comp_counts
-# -------------------------------------------------
-# 5) Mammal protection category composition by region — STACKED COUNTS
-# -------------------------------------------------
+
+# ---- Plot: Mammal protection composition (important only) ----
 
 mammals_comp_counts <- dat %>%
   filter(group == "Mammal") %>%
@@ -1145,17 +1189,15 @@ fig_mammal_comp_counts <- ggplot(mammals_comp_counts, aes(region, n, fill = prot
   scale_fill_manual(values = pal_protect) +
   scale_y_continuous(expand = expansion(mult = c(0, .1))) +
   labs(
-    title = "Mammal protection category by region (stacked counts)",
-    x = "Region", y = "Number of records", fill = "Category"
+    title = "Mammal protection category by region (important only, stacked counts)",
+    x = "Region", y = "Number of important mammal records", fill = "Category"
   ) +
   theme_ecia()
 
 fig_mammal_comp_counts
 
+# ---- Plot: Combined composition (important only) ----
 
-
-
-#----plot with boirds and mammals stacked bar of amber and red ----
 # Build bird composition (Red/Amber)
 birds_comp_counts <- dat %>%
   filter(group == "Bird", status %in% c("Red","Amber")) %>%
@@ -1196,27 +1238,73 @@ pal_comp <- c(
   "SBL Priority" = "#74C69D"
 )
 
-fig_comp_combined <- ggplot(comp_all, aes(region, n, fill = category)) +
-  geom_col(width = 0.7, color = "white") +
-  # Segment labels
+fig_comp_combinedimportantbyregionandstatus <- ggplot(comp_all, aes(region, n, fill = category)) +
+  geom_col(
+    width = 0.7,
+    color = "grey90",        # clearer bar edges
+    linewidth = 0.3
+  ) +
   geom_text(
     aes(label = ifelse(n > 0, n, "")),
     position = position_stack(vjust = 0.5),
-    size = 3.2
+    size = 3.4,
+    color = "black",
+    fontface = "bold"
   ) +
-  # Totals per stacked bar
   geom_text(
     data = comp_totals,
     aes(region, total, label = paste0("Total: ", total)),
-    vjust = -0.5, size = 3.2, fontface = "bold", inherit.aes = FALSE
+    vjust = -0.6,
+    size = 3.4,
+    fontface = "bold",
+    inherit.aes = FALSE
   ) +
   facet_wrap(~ group, ncol = 2, scales = "fixed") +
   scale_fill_manual(values = pal_comp, drop = FALSE) +
-  scale_y_continuous(expand = expansion(mult = c(0, .1))) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.12))
+  ) +
   labs(
     title = "Composition of important records by region (Bird BoCC and Mammal protection)",
-    x = "Region", y = "Number of records", fill = "Category"
+    x = "Region",
+    y = "Number of important records",
+    fill = "Category"
   ) +
-  theme_ecia()
+  theme_ecia() +
+  theme(
+    # clearer axes
+    axis.line = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks = element_line(colour = "black"),
+    
+    # axis text and titles
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, colour = "black"),
+    axis.text.y = element_text(size = 10, colour = "black"),
+    axis.title = element_text(size = 11, face = "bold"),
+    
+    # facet labels
+    strip.text = element_text(size = 11, face = "bold"),
+    
+    # title
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    
+    # legend
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text = element_text(size = 9),
+    
+    plot.margin = margin(10, 15, 10, 10)
+  )
 
-fig_comp_combined
+fig_comp_combinedimportantbyregionandstatus
+
+
+
+
+
+
+#----plots for report----
+p_rich_all
+p_diverge_final
+fig_abundanceimportant
+fig_richnessimportant
+fig_heatmapimportant
+fig_comp_combinedimportantbyregionandstatus
