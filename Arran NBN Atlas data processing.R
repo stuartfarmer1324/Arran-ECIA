@@ -780,3 +780,4 @@ fig_mammals_heatmap <- ggplot(
 
 fig_birds_heatmap
 fig_mammals_heatmap
+#end of script
