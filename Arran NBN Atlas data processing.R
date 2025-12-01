@@ -716,7 +716,6 @@ birds_classified <- important_clean %>%
     species = scientific_name_raw_buf
   )
 
-
 # ---- 2 + 3. ALL IMPORTANT / PROTECTED MAMMALS (including bats) ----
 mammals_classified <- important_clean %>%
   filter(group == "Mammal") %>%   # <--- includes bats now too
@@ -731,7 +730,6 @@ mammals_classified <- important_clean %>%
   filter(!is.na(classification)) %>%  # keep only important mammals
   mutate(species = scientific_name_raw_buf)
 
-
 # ---- COLOUR PALETTE ----
 pal_all <- c(
   "EPS"       = "#2D6A4F",
@@ -742,8 +740,6 @@ pal_all <- c(
   "Green"     = "#74C69D",
   "Other"     = "grey80"
 )
-
-
 
 # ---- BIRD HEATMAP ----
 fig_birds_heatmap <- ggplot(
@@ -783,5 +779,4 @@ fig_mammals_heatmap <- ggplot(
 
 
 fig_birds_heatmap
-fig_mammals_heatmap 
-
+fig_mammals_heatmap
