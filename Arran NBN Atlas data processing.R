@@ -7,6 +7,7 @@ library(scales)
 # ---- Paths ----
 out_dir <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas"
 
+<<<<<<< HEAD
 north_path      <- file.path(out_dir, "North species list.txt")
 south_path      <- file.path(out_dir, "updated south candidate site.txt")
 north_500_path  <- file.path(out_dir, "Terrestrial buffer North.txt")
@@ -24,6 +25,77 @@ robust_read <- function(path) {
     show_col_types = FALSE,
     progress = FALSE
   )
+=======
+#----Converting NBN output to CSVs----
+north_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/North species list.txt"
+south_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/updated south candidate site.txt"
+out_dir    <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas"
+status_lookup <- file.path(out_dir, "status_lookup.csv")  # optional
+
+read_nbn <- function(path, site_id) {
+  x <- readr::read_csv(path, show_col_types = FALSE, locale = readr::locale(encoding = "UTF-8")) |>
+    clean_names()
+  
+  if (!"lsid" %in% names(x)) stop("LSID column not found in: ", path)
+  
+  lsid <- str_split_fixed(x$lsid %||% "", pattern = "//|", n = 5) |> as_tibble()
+  names(lsid) <- c("lsid_sci_from_blob","nbn_key_from_blob","vernacular_from_blob","kingdom_from_blob","family_from_blob")
+  x <- bind_cols(x, lsid)
+  
+  inv_raw <- x$invasive %||% ""
+  inv_n   <- suppressWarnings(as.integer(str_extract(inv_raw, "//d+")))
+  inv_src <- str_match(inv_raw, '//d+"?//s*,//s*"?([^"]*)"?$')[,2] |> na_if("")
+  
+  x <- x |>
+    mutate(
+      site_id = site_id,
+      scientific_name = coalesce(species_name, lsid_sci_from_blob) |> str_squish(),
+      vernacular_name = coalesce(vernacular_name, vernacular_from_blob) |> na_if(""),
+      kingdom = coalesce(kingdom, kingdom_from_blob),
+      family  = coalesce(family,  family_from_blob),
+      nbn_key = nbn_key_from_blob,
+      number_of_records = coalesce(suppressWarnings(as.integer(number_of_records)), inv_n),
+      invasive_source = inv_src,
+      invasive_flag = !is.na(invasive_source),
+      genus = coalesce(genus, word(scientific_name, 1)),
+      taxon_group = case_when(
+        str_to_lower(class) %in% "aves" ~ "Birds",
+        str_to_lower(class) %in% "mammalia" ~ "Mammals",
+        str_to_lower(class) %in% "amphibia" ~ "Amphibians",
+        str_to_lower(class) %in% "reptilia" ~ "Reptiles",
+        str_to_lower(class) %in% c("actinopterygii","elasmobranchii") ~ "Fish",
+        str_to_lower(class) %in% c("insecta","arachnida","malacostraca") ~ "Invertebrates",
+        str_to_lower(kingdom) %in% "plantae" ~ "Plants",
+        TRUE ~ "Other/Unknown"
+      )
+    ) |>
+    filter(!is.na(scientific_name) & scientific_name != "") |>
+    distinct()
+  
+  if (file.exists(status_lookup)) {
+    st <- readr::read_csv(status_lookup, show_col_types = FALSE) |>
+      clean_names() |>
+      mutate(scientific_name = str_squish(scientific_name))
+    x <- x |> left_join(st, by = "scientific_name")
+  } else {
+    x <- x |>
+      mutate(
+        eps_flag = NA, wca_schedule = NA, sbl_flag = NA,
+        red_list_category = NA, annex_i_flag = NA, schedule_9 = NA
+      )
+  }
+  
+  rl_code <- str_extract(str_to_upper(x$red_list_category %||% ""), "CR|EN|VU|NT|LC|DD|NE")
+  x <- x |>
+    mutate(
+      red_list_code = rl_code,
+      endangered_flag = red_list_code %in% c("EN","CR"),
+      threatened_flag = red_list_code %in% c("VU","EN","CR"),
+      evidence_tier = "present"
+    )
+  
+  x
+>>>>>>> 000e30e37f50967cbe207820092779eb55b6cded
 }
 
 # ---- Read & Clean NBN ----
@@ -745,6 +817,7 @@ pal_all <- c(
 
 
 
+<<<<<<< HEAD
 # ---- BIRD HEATMAP ----
 fig_birds_heatmap <- ggplot(
   birds_classified,
@@ -784,4 +857,73 @@ fig_mammals_heatmap <- ggplot(
 
 fig_birds_heatmap
 fig_mammals_heatmap 
+=======
+
+
+
+#----Buffer data importing from NBN Atlas----
+# Paths to your four buffer exports (update the filenames if needed)
+north_500_path   <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/Terrestrial buffer North.txt"
+north_2000_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/ABUFN.txt"
+south_500_path  <- "C:/Users/stuar/Downloads/Species_list_20251121_1763693625121.txt"
+south_2000_path <- "C:/Users/stuar/Documents/Masters/Arran/Data/NBN Atlas/ABUFS.txt"
+
+# Read using your existing parser
+north_500  <- read_nbn(north_500_path,  "North")
+north_2000 <- read_nbn(north_2000_path, "North")
+south_500  <- read_nbn(south_500_path,  "South")
+south_2000 <- read_nbn(south_2000_path, "South")
+
+# Filters
+filter_birds_bats <- function(df) {
+  df %>%
+    mutate(cls = tolower(coalesce(class, "")),
+           ord = tolower(coalesce(order, ""))) %>%
+    filter(cls == "aves" | ord == "chiroptera") %>%
+    select(-cls, -ord)
+}
+
+filter_terrestrial_animals <- function(df) {
+  df %>%
+    mutate(k   = tolower(coalesce(kingdom, "")),
+           cls = tolower(coalesce(class, "")),
+           ord = tolower(coalesce(order, ""))) %>%
+    filter(
+      k == "animalia",                 # animals only
+      cls != "aves",                   # exclude birds
+      ord != "chiroptera",             # exclude bats
+      !cls %in% c("actinopterygii","elasmobranchii") # exclude fish
+    ) %>%
+    select(-k, -cls, -ord)
+}
+
+# Apply filters and tag zones
+north_500_ter  <- filter_terrestrial_animals(north_500)  %>% mutate(zone = "500m_terrestrial")
+north_2000_bb  <- filter_birds_bats(north_2000)          %>% mutate(zone = "2000m_birds_bats")
+south_500_ter  <- filter_terrestrial_animals(south_500)  %>% mutate(zone = "500m_terrestrial")
+south_2000_bb  <- filter_birds_bats(south_2000)          %>% mutate(zone = "2000m_birds_bats")
+
+# Glue buffers per site
+nbn_north_buffers <- bind_rows(north_500_ter, north_2000_bb)
+nbn_south_buffers <- bind_rows(south_500_ter, south_2000_bb)
+
+# Optional: combine all and save
+nbn_buffers_all <- bind_rows(nbn_north_buffers, nbn_south_buffers) %>%
+  mutate(number_of_records = as.integer(number_of_records) %||% 0L)
+
+readr::write_csv(nbn_north_buffers, file.path(out_dir, "nbn_north_buffers_filtered.csv"))
+readr::write_csv(nbn_south_buffers, file.path(out_dir, "nbn_south_buffers_filtered.csv"))
+readr::write_csv(nbn_buffers_all,  file.path(out_dir, "nbn_buffers_all_filtered.csv"))
+
+# Quick checks
+nbn_buffers_all %>%
+  group_by(site_id, zone) %>%
+  summarise(
+    richness = n_distinct(scientific_name),
+    records  = sum(replace_na(number_of_records, 0L)),
+    .groups = "drop"
+  ) %>%
+  arrange(site_id, zone) %>%
+  print(n = Inf)
+>>>>>>> 000e30e37f50967cbe207820092779eb55b6cded
 
