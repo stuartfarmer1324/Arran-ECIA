@@ -65,10 +65,12 @@ assoc <- assoc %>%
     scientific_raw  = scientificme
   ) %>%
   mutate(
-    common_name_raw = str_squish(common_name_raw),
-    scientific_raw  = str_squish(scientific_raw),
-    common_name     = str_to_lower(common_name_raw),
-    scientific_name = str_to_lower(scientific_raw),
+    common_name_raw   = str_squish(common_name_raw),
+    scientific_raw    = str_squish(scientific_raw),
+    common_name       = str_to_lower(common_name_raw),
+    scientific_name   = str_to_lower(scientific_raw),
+    # NEW: title-case common name for policy-facing outputs
+    common_name_title = str_to_title(common_name_raw),
     
     kingdom           = str_to_sentence(str_squish(kingdom)),
     taxonrank         = str_to_sentence(str_squish(taxonRank)),
@@ -86,6 +88,7 @@ assoc <- assoc %>%
       TRUE ~ NA_character_
     )
   )
+
 
 # ---- Genus → synthetic taxon imputation (hybrid sci + common name) ----
 
@@ -212,6 +215,14 @@ assoc_use <- assoc %>%
     occurrence_status == "Present",
     !is.na(region)
   )
+
+assoc_use <- assoc_use %>%
+  mutate(
+    Pollutionscore    = suppressWarnings(as.numeric(Pollutionscore)),
+    event_id          = str_replace_all(event_id, " ", "_"),
+    common_name_title = str_to_title(common_name_raw)
+  )
+
 
 # ---- Group assignment ----
 
@@ -590,6 +601,187 @@ geom_text(
   )
 
 overall_abundance_plot
+
+
+#----Aquatic invertebrates----
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(patchwork)
+
+# clean data 
+assoc_use <- assoc_use %>%
+  mutate(
+    Pollutionscore = suppressWarnings(as.numeric(Pollutionscore)),
+    event_id = str_replace_all(event_id, " ", "_")
+  )
+
+fresh_inverts <- assoc_use %>%
+  filter(
+    group == "Aquatic invertebrates",
+    !is.na(Pollutionscore),
+    Pollutionscore > 0
+  )
+
+# aspt calculations 
+aspt_sites <- fresh_inverts %>%
+  group_by(event_id, hillside) %>%
+  summarise(
+    BMWP = sum(Pollutionscore, na.rm = TRUE),
+    n_taxa = n(),
+    ASPT = BMWP / n_taxa,
+    .groups = "drop"
+  )
+
+aspt_totals <- fresh_inverts %>%
+  group_by(hillside) %>%
+  summarise(
+    BMWP = sum(Pollutionscore, na.rm = TRUE),
+    n_taxa = n(),
+    ASPT = BMWP / n_taxa,
+    .groups = "drop"
+  ) %>%
+  mutate(event_id = ifelse(hillside == "North", "N_total", "S_total"))
+
+df <- bind_rows(aspt_sites, aspt_totals)
+
+# site labels
+site_labels <- c(
+  "ND4FI_A" = "Downstream NE",
+  "NU4FI_A" = "Upstream NE",
+  "ND4FI_B" = "Downstream NW",
+  "NU4FI_B" = "Upstream NW",
+  "N_total" = "North Total",
+  "SD4FI_A" = "Downstream SE",
+  "SU4FI_A" = "Upstream SE",
+  "SD4FI_B" = "South Bog",
+  "SU4FI_B" = "Upstream of South Bog",
+  "S_total" = "South Total"
+)
+
+small_gap <- 0.65
+group_gap <- 0.95
+big_gap <- 1.3
+
+x_ND4FI_A <- 1
+x_NU4FI_A <- x_ND4FI_A + small_gap
+x_ND4FI_B <- x_NU4FI_A + group_gap
+x_NU4FI_B <- x_ND4FI_B + small_gap
+x_N_total <- x_NU4FI_B + group_gap
+
+x_SD4FI_A <- x_N_total + big_gap
+x_SU4FI_A <- x_SD4FI_A + small_gap
+x_SD4FI_B <- x_SU4FI_A + group_gap
+x_SU4FI_B <- x_SD4FI_B + small_gap
+x_S_total <- x_SU4FI_B + group_gap
+
+positions <- c(
+  ND4FI_A = x_ND4FI_A,
+  NU4FI_A = x_NU4FI_A,
+  ND4FI_B = x_ND4FI_B,
+  NU4FI_B = x_NU4FI_B,
+  N_total = x_N_total,
+  SD4FI_A = x_SD4FI_A,
+  SU4FI_A = x_SU4FI_A,
+  SD4FI_B = x_SD4FI_B,
+  SU4FI_B = x_SU4FI_B,
+  S_total = x_S_total
+)
+
+df <- df %>%
+  mutate(
+    x = positions[event_id],
+    label = site_labels[event_id],
+    is_total = event_id %in% c("N_total", "S_total")
+  )
+
+# heatmap data – now grouped by common_name_title (policy-friendly labels)
+region_heat <- assoc_use %>%
+  filter(group == "Aquatic invertebrates") %>%
+  group_by(hillside, common_name_title) %>%
+  summarise(
+    abundance = sum(individualCount, na.rm = TRUE),
+    bmwpscore = mean(Pollutionscore, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    hillside         = factor(hillside, levels = c("North", "South")),
+    common_name_title = factor(common_name_title, levels = sort(unique(common_name_title)))
+  )
+
+common_scale <- scale_fill_gradient(
+  low = "#d6e9f9",
+  high = "#08306b",
+  name = "BMWP Score"
+)
+
+##### ASPT bar plot #####
+plot_aspt <- ggplot(df, aes(x = x, y = ASPT, fill = hillside)) +
+  geom_col(aes(width = ifelse(is_total, 0.8, 0.55)), colour = "white") +
+  geom_text(
+    aes(label = round(ASPT, 2)),
+    vjust = -0.3,
+    fontface = ifelse(df$is_total, "bold", "plain"),
+    size = 4
+  ) +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
+  scale_x_continuous(
+    breaks = df$x,
+    labels = df$label,
+    expand = expansion(mult = c(0.02, 0.05))
+  ) +
+  scale_y_continuous(
+    limits = c(0, 8.25),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "ASPT by Site (Upstream & Downstream Grouped)",
+    x = "Site",
+    y = "ASPT Score",
+    fill = "Region"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    axis.line.x = element_line(colour = "black", linewidth = 1),
+    axis.line.y = element_line(colour = "black", linewidth = 1),
+    axis.ticks = element_line(colour = "black"),
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold", size = 18),
+    legend.position = "right"
+  )
+
+# combined heatmap – y-axis is now common (English) names
+heatmap_combined <- ggplot(region_heat,
+                           aes(x = hillside,
+                               y = common_name_title,
+                               fill = bmwpscore)) +
+  geom_tile(colour = "white", linewidth = 0.7) +
+  geom_text(aes(label = abundance),
+            colour = "black",
+            fontface = "bold",
+            size = 4) +
+  common_scale +
+  labs(
+    title = "Aquatic Invertebrate BMWP & Abundance (North vs South)",
+    x = "Region",
+    y = "Taxon (common name)"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    axis.line.x = element_line(colour = "black"),
+    axis.line.y = element_line(colour = "black"),
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold", size = 18),
+    legend.position = "right"
+  )
+
+# print plots
+plot_aspt
+heatmap_combined
 
 
 
@@ -1353,13 +1545,19 @@ fig_comp_combinedimportantbyregionandstatus <- ggplot(comp_all, aes(region, n, f
 
 fig_comp_combinedimportantbyregionandstatus
 
+
+
+
+
 # ---- Plots for report ----
 p_rich_all
 p_diverge_final
 overall_abundance_plot
+plot_aspt
+heatmap_combined
 fig_abundanceimportant
 fig_richnessimportant
-fig_heatmapimportant
+fig_heatmapimportant #need to change so all use common name
 fig_comp_combinedimportantbyregionandstatus
 
 
