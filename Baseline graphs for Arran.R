@@ -891,6 +891,7 @@ p_terrestrial
 
 # ---- Environmental Comparison Plot with Solid Axes + Non-Overlapping Bars ----
 # ---- Build Moth Air-Quality (Nitrogen Pollution) Score ----
+# ---- Moth nitrogen air-quality score ----
 
 moth_data <- assoc_use %>%
   filter(
@@ -900,11 +901,10 @@ moth_data <- assoc_use %>%
   ) %>%
   mutate(
     cname_lc = tolower(common_name),
-    # Higher nitrogen-loving species = lower air quality
     nitrogen_score = case_when(
-      str_detect(cname_lc, "yellow shell|shaded broad-bar|grass moth") ~ 1,  # high-N tolerant
-      str_detect(cname_lc, "carpet|pug|footman") ~ 2,                         # intermediate
-      TRUE ~ 3                                                                # high-quality low-N species
+      str_detect(cname_lc, "yellow shell|shaded broad-bar|grass moth") ~ 1,
+      str_detect(cname_lc, "carpet|pug|footman") ~ 2,
+      TRUE ~ 3
     ),
     air_weighted = nitrogen_score * log1p(individualCount)
   )
@@ -919,9 +919,10 @@ air_quality <- moth_data %>%
 combined_scores_raw <- air_quality %>%
   rename(air_raw = score_raw) %>%
   left_join(
-    habitat_scaled %>% select(hillside, habitat_total),
+    habitat_scaled %>% select(hillside, Average),  # from your updated terrestrial plot
     by = "hillside"
   ) %>%
+  rename(habitat_raw = Average) %>%
   left_join(
     aspt_totals %>%
       select(hillside, ASPT) %>%
@@ -929,14 +930,16 @@ combined_scores_raw <- air_quality %>%
     by = "hillside"
   )
 
-# wide format for scaling
+# ---- Wide format for scaling ----
+
 w <- combined_scores_raw %>%
   pivot_wider(
     names_from = hillside,
-    values_from = c(air_raw, habitat_total, freshwater_raw)
+    values_from = c(air_raw, habitat_raw, freshwater_raw)
   )
 
-# scaling helper
+# ---- Scaling helpers ----
+
 scale_to_one <- function(xN, xS) {
   maxv <- max(xN, xS, na.rm = TRUE)
   list(N = xN / maxv, S = xS / maxv)
@@ -946,15 +949,16 @@ safe_extract <- function(df, colname) {
   df %>% pull({{colname}}) %>% unique() %>% max(na.rm = TRUE)
 }
 
-# scale each metric
+# ---- Apply scaling to all 3 metrics ----
+
 air_scaled <- scale_to_one(
   safe_extract(w, air_raw_North),
   safe_extract(w, air_raw_South)
 )
 
 hab_scaled <- scale_to_one(
-  safe_extract(w, habitat_total_North),
-  safe_extract(w, habitat_total_South)
+  safe_extract(w, habitat_raw_North),
+  safe_extract(w, habitat_raw_South)
 )
 
 fresh_scaled <- scale_to_one(
@@ -962,7 +966,8 @@ fresh_scaled <- scale_to_one(
   safe_extract(w, freshwater_raw_South)
 )
 
-# combined scaled values
+# ---- Combined scaled values ----
+
 scaled_scores <- tibble(
   test = c(
     "Air Pollution (Moths)",
@@ -973,14 +978,16 @@ scaled_scores <- tibble(
   South = c(air_scaled$S, fresh_scaled$S, hab_scaled$S)
 )
 
-# overall mean score
+# ---- Overall score ----
+
 overall_scores <- tibble(
   test = "Overall Environmental Score",
   North = mean(scaled_scores$North, na.rm = TRUE),
   South = mean(scaled_scores$South, na.rm = TRUE)
 )
 
-# long format for plotting
+# ---- Long format for plotting ----
+
 plot_scores <- scaled_scores %>%
   bind_rows(overall_scores) %>%
   pivot_longer(
@@ -988,6 +995,8 @@ plot_scores <- scaled_scores %>%
     names_to = "hillside",
     values_to = "scaled_score"
   )
+
+# ---- Plot: All environmental metrics ----
 
 p_all_env <- ggplot(
   plot_scores,
@@ -1023,7 +1032,6 @@ p_all_env <- ggplot(
     axis.line.y = element_line(colour = "black", linewidth = 1)
   )
 
-p_terrestrial
 p_all_env
 # ---- Birds: BoCC5 lists ----
 bocc5_part1 <- tribble(
@@ -1812,7 +1820,7 @@ fig_comp_combinedimportantbyregionandstatus
 
 
 
-# ---- Plots for report ----
+# ---- Potential plots for report ----
 p_rich_all
 p_diverge_final
 overall_abundance_plot
@@ -1824,4 +1832,19 @@ fig_abundanceimportant #probably wont use
 fig_heatmapimportant 
 fig_comp_combinedimportantbyregionandstatus
 
+#----finalised plots for report----
 
+#figure 1
+p_diverge_final
+overall_abundance_plot
+
+
+#Figure 2
+plot_aspt
+heatmap_combined
+p_terrestrial
+p_all_env
+
+#Figure 3
+fig_heatmapimportant 
+fig_comp_combinedimportantbyregionandstatus
