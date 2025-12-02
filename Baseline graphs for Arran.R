@@ -603,7 +603,8 @@ geom_text(
 overall_abundance_plot
 
 
-#----Aquatic invertebrates----
+#----Invertebrate environemntal quality indicators----
+####Freshwater Invertebrates####
 library(dplyr)
 library(ggplot2)
 library(stringr)
@@ -715,7 +716,7 @@ common_scale <- scale_fill_gradient(
   name = "BMWP Score"
 )
 
-##### ASPT bar plot #####
+###ASPT bar plot ##
 plot_aspt <- ggplot(df, aes(x = x, y = ASPT, fill = hillside)) +
   geom_col(aes(width = ifelse(is_total, 0.8, 0.55)), colour = "white") +
   geom_text(
@@ -779,11 +780,275 @@ heatmap_combined <- ggplot(region_heat,
     legend.position = "right"
   )
 
+
 # print plots
 plot_aspt
 heatmap_combined
 
 
+
+
+
+####Moths, terrestrial invertebrates and Overall environmental comparison####
+library(tidyverse)
+
+# ---- Derive Terrestrial Invertebrate Traits from assoc_use ----
+
+# expects assoc_use with:
+# - group (includes "Terrestrial invertebrates")
+# - hillside (North / South)
+# - order_name, common_name, scientific_name
+# - individualCount (abundance)
+
+terrestrial_traits <- assoc_use %>%
+  filter(
+    group == "Terrestrial invertebrates",
+    !is.na(individualCount),
+    individualCount > 0,
+    !str_detect(order_name, regex("lepidoptera", ignore_case = TRUE))
+  ) %>%
+  mutate(
+    order_lc = tolower(order_name),
+    cname_lc = tolower(coalesce(common_name, "")),
+    sname_lc = tolower(coalesce(scientific_name, "")),
+    
+    woodland_score = case_when(
+      str_detect(cname_lc, "woodlouse|woodlouse|slug|snail|millipede|centipede") ~ 2,
+      str_detect(order_lc, "coleoptera|araneae|opiliones") ~ 2,
+      str_detect(order_lc, "hymenoptera|hemiptera|diptera") ~ 1,
+      TRUE ~ 0
+    ),
+    
+    moisture_score = case_when(
+      str_detect(cname_lc, "woodlouse|slug|snail|millipede|centipede") ~ 2,
+      str_detect(order_lc, "coleoptera|araneae") ~ 1,
+      TRUE ~ 0
+    ),
+    
+    trophic_score = case_when(
+      str_detect(order_lc, "araneae|opiliones") ~ 2,                                 # spiders, harvestmen
+      str_detect(cname_lc, "ground beetle|carabid") ~ 2,                             # ground beetles
+      str_detect(cname_lc, "woodlouse|millipede|centipede|earthworm|slug|snail") ~ 1,# detritivores
+      str_detect(order_lc, "coleoptera") ~ 1.5,                                      # many beetles pred/scav
+      str_detect(order_lc, "hymenoptera") ~ 1,                                       # ants, many omnivores
+      TRUE ~ 0.5                                                                     # default herbivore/low-signal
+    ),
+    
+    saproxylic_score = case_when(
+      str_detect(cname_lc, "longhorn|click beetle|dor beetle|bark beetle") ~ 2,
+      str_detect(order_lc, "coleoptera") ~ 1,
+      TRUE ~ 0
+    ),
+    
+    log_abund = log1p(individualCount),
+    composite_score = woodland_score + moisture_score + trophic_score + saproxylic_score
+  )
+
+habitat_quality <- terrestrial_traits %>%
+  group_by(hillside) %>%
+  summarise(
+    woodland_raw   = sum(woodland_score   * log_abund, na.rm = TRUE),
+    moisture_raw   = sum(moisture_score   * log_abund, na.rm = TRUE),
+    trophic_raw    = sum(trophic_score    * log_abund, na.rm = TRUE),
+    saproxylic_raw = sum(saproxylic_score * log_abund, na.rm = TRUE),
+    habitat_raw    = sum(composite_score  * log_abund, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ---- Terrestrial Invertebrate Metric Breakdown ----
+
+habitat_scaled <- habitat_quality %>%
+  mutate(
+    woodland      = woodland_raw   / max(woodland_raw,   na.rm = TRUE),
+    moisture      = moisture_raw   / max(moisture_raw,   na.rm = TRUE),
+    trophic       = trophic_raw    / max(trophic_raw,    na.rm = TRUE),
+    saproxylic    = saproxylic_raw / max(saproxylic_raw, na.rm = TRUE),
+    habitat_total = habitat_raw    / max(habitat_raw,    na.rm = TRUE)
+  ) %>%
+  select(hillside, woodland, moisture, trophic, saproxylic, habitat_total)
+
+hab_plot <- habitat_scaled %>%
+  pivot_longer(
+    cols = -hillside,
+    names_to = "metric",
+    values_to = "score"
+  )
+
+# ---- Terrestrial Invertebrate Plot with Solid Axes + Non-Overlapping Bars ----
+
+p_terrestrial <- ggplot(hab_plot,
+                        aes(x = metric, y = score, fill = hillside)) +
+  geom_col(
+    width = 0.6,
+    position = position_dodge(width = 0.75)
+  ) +
+  geom_text(
+    aes(label = round(score, 2)),
+    position = position_dodge(width = 0.75),
+    vjust = -0.2,
+    size = 4
+  ) +
+  scale_fill_manual(values = c("North" = "#D55E00", "South" = "#0072B2")) +
+  scale_y_continuous(
+    limits = c(0, 1.05),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "Terrestrial Invertebrate Habitat-Quality Metrics",
+    x = "Metrics for Environmental Quality",
+    y = "Scaled score (0–1)",
+    fill = "Candidate Site"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    panel.grid = element_blank(),
+    axis.line.x = element_line(colour = "black", linewidth = 1),
+    axis.line.y = element_line(colour = "black", linewidth = 1)
+  )
+
+p_terrestrial
+# ---- Environmental Comparison Plot with Solid Axes + Non-Overlapping Bars ----
+# ---- Build Moth Air-Quality (Nitrogen Pollution) Score ----
+
+# expects assoc_use with:
+# - group == "Terrestrial invertebrates" for inverts
+# - BUT moths are in group == "Terrestrial invertebrates" *or* "Other"
+# better: detect Lepidoptera directly
+
+moth_data <- assoc_use %>%
+  filter(
+    str_detect(order_name, regex("lepidoptera", ignore_case = TRUE)),
+    !is.na(individualCount),
+    individualCount > 0
+  ) %>%
+  mutate(
+    cname_lc = tolower(common_name),
+    # Higher nitrogen-loving species = lower air quality
+    nitrogen_score = case_when(
+      str_detect(cname_lc, "yellow shell|shaded broad-bar|grass moth") ~ 1,  # high-N tolerant
+      str_detect(cname_lc, "carpet|pug|footman") ~ 2,                         # intermediate
+      TRUE ~ 3                                                                # high-quality low-N species
+    ),
+    air_weighted = nitrogen_score * log1p(individualCount)
+  )
+
+air_quality <- moth_data %>%
+  group_by(hillside) %>%
+  summarise(
+    score_raw = sum(air_weighted, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+combined_scores_raw <- air_quality %>%
+  rename(air_raw = score_raw) %>%
+  left_join(
+    habitat_scaled %>% select(hillside, habitat_total),
+    by = "hillside"
+  ) %>%
+  left_join(
+    aspt_totals %>%
+      select(hillside, ASPT) %>%
+      rename(freshwater_raw = ASPT),
+    by = "hillside"
+  )
+
+# wide format for scaling
+w <- combined_scores_raw %>%
+  pivot_wider(
+    names_from = hillside,
+    values_from = c(air_raw, habitat_total, freshwater_raw)
+  )
+
+# scaling helper
+scale_to_one <- function(xN, xS) {
+  maxv <- max(xN, xS, na.rm = TRUE)
+  list(N = xN / maxv, S = xS / maxv)
+}
+
+safe_extract <- function(df, colname) {
+  df %>% pull({{colname}}) %>% unique() %>% max(na.rm = TRUE)
+}
+
+# scale each metric
+air_scaled <- scale_to_one(
+  safe_extract(w, air_raw_North),
+  safe_extract(w, air_raw_South)
+)
+
+hab_scaled <- scale_to_one(
+  safe_extract(w, habitat_total_North),
+  safe_extract(w, habitat_total_South)
+)
+
+fresh_scaled <- scale_to_one(
+  safe_extract(w, freshwater_raw_North),
+  safe_extract(w, freshwater_raw_South)
+)
+
+# combined scaled values
+scaled_scores <- tibble(
+  test = c(
+    "Air Pollution (Moths)",
+    "Freshwater Quality (ASPT)",
+    "Habitat Quality (Terrestrial Inverts)"
+  ),
+  North = c(air_scaled$N, fresh_scaled$N, hab_scaled$N),
+  South = c(air_scaled$S, fresh_scaled$S, hab_scaled$S)
+)
+
+# overall mean score
+overall_scores <- tibble(
+  test = "Overall Environmental Score",
+  North = mean(scaled_scores$North, na.rm = TRUE),
+  South = mean(scaled_scores$South, na.rm = TRUE)
+)
+
+# long format for plotting
+plot_scores <- scaled_scores %>%
+  bind_rows(overall_scores) %>%
+  pivot_longer(
+    cols = c(North, South),
+    names_to = "hillside",
+    values_to = "scaled_score"
+  )
+
+
+p_all_env <- ggplot(
+  plot_scores,
+  aes(x = test, y = scaled_score, fill = hillside)
+) +
+  geom_col(
+    width = 0.6,
+    position = position_dodge(width = 0.75)
+  ) +
+  geom_text(
+    aes(label = round(scaled_score, 2)),
+    position = position_dodge(width = 0.75),
+    vjust = -0.2,
+    size = 4
+  ) +
+  scale_fill_manual(values = c("North" = "#D55E00", "South" = "#0072B2")) +
+  scale_y_continuous(
+    limits = c(0, 1.05),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "Environmental Quality Scores from Invertebrate Groups",
+    x = "Environmental Quality Metric",
+    y = "Scaled score (0–1)",
+    fill = "Candidate Site"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    panel.grid = element_blank(),
+    axis.line.x = element_line(colour = "black", linewidth = 1),
+    axis.line.y = element_line(colour = "black", linewidth = 1)
+  )
+p_terrestrial
+p_all_env
 
 # ---- Birds: BoCC5 lists ----
 bocc5_part1 <- tribble(
@@ -1555,6 +1820,8 @@ p_diverge_final
 overall_abundance_plot
 plot_aspt
 heatmap_combined
+p_terrestrial
+p_all_env
 fig_abundanceimportant
 fig_richnessimportant
 fig_heatmapimportant #need to change so all use common name
