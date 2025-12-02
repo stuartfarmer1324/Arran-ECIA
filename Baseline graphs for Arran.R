@@ -322,6 +322,7 @@ p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
   geom_text(aes(label = n_species),
             position = hillside_dodge,
             hjust = -0.2, size = 3.8, colour = "grey20") +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
   scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
   labs(
     title    = "Richness by sampled group and hillside",
@@ -333,7 +334,9 @@ p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
   theme_minimal(base_size = 12) +
   theme(
     legend.position    = "top",
-    panel.grid.major.y = element_blank(),
+    panel.grid = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
     axis.line.x  = element_line(colour = "black", linewidth = 0.6),
     axis.line.y  = element_line(colour = "black", linewidth = 0.6),
     axis.ticks.x = element_line(colour = "black"),
@@ -382,8 +385,8 @@ p_diverge_final <- ggplot(df_div, aes(y = group)) +
     hjust = 1, size = 3.4, colour = "grey40"
   ) +
   scale_fill_manual(values = c(
-    "North" = "#74A9CF",
-    "South" = "#A1D99B",
+    "North" = "#E76F51",
+    "South" = "#2A9D8F",
     "Tie"   = "grey80"
   )) +
   scale_x_continuous(
@@ -392,16 +395,16 @@ p_diverge_final <- ggplot(df_div, aes(y = group)) +
     expand = expansion(mult = c(0.12, 0.12))
   ) +
   labs(
-    title = "Richness difference by group (South minus North)",
-    subtitle = "Positive bars = richer in South; negative bars = richer in North",
-    x = "Difference in richness (species)",
+    x = "Difference in species richness ",
     y = "Group",
-    fill = ""
+    fill = "Candidate site"
   ) +
   theme_minimal(base_size = 14) +
   theme(
-    legend.position = "top",
-    panel.grid.major.y = element_blank(),
+    legend.position = "right",
+    panel.grid = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
     axis.text.y = element_text(size = 12),
     axis.text.x = element_text(size = 12),
     plot.title = element_text(size = 14, face = "bold"),
@@ -414,64 +417,8 @@ p_diverge_final <- ggplot(df_div, aes(y = group)) +
 
 p_diverge_final
 
-# 6.3 Rank–abundance (actually record frequency) per hillside
-rank_abund_all <- oc_use %>%
-  count(hillside, taxon_unit, name = "records") %>%
-  group_by(hillside) %>%
-  arrange(desc(records), .by_group = TRUE) %>%
-  mutate(rank = row_number()) %>%
-  ungroup()
 
-p_rank_all <- ggplot(rank_abund_all, aes(x = rank, y = records, colour = hillside)) +
-  geom_line() +
-  geom_point(size = 1.5) +
-  scale_y_log10() +
-  labs(
-    title    = "Rank–abundance (by record frequency)",
-    subtitle = "Species-level (genus-only records imputed)",
-    x        = "Species rank (per hillside)",
-    y        = "Records (log scale)",
-    colour   = NULL
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "top")
-
-p_rank_all
-
-# 6.4 Similarity (Jaccard) between hillsides by group (richness-based)
-jaccard_by_group <- oc_use %>%
-  distinct(group, hillside, taxon_unit) %>%
-  group_by(group) %>%
-  summarise(
-    north  = n_distinct(taxon_unit[hillside == "North"]),
-    south  = n_distinct(taxon_unit[hillside == "South"]),
-    shared = n_distinct(intersect(
-      taxon_unit[hillside == "North"],
-      taxon_unit[hillside == "South"]
-    )),
-    jaccard = if_else(north + south - shared == 0,
-                      NA_real_, shared / (north + south - shared)),
-    .groups = "drop"
-  ) %>%
-  filter(group %in% group_levels)
-
-p_jaccard_all <- ggplot(jaccard_by_group,
-                        aes(x = jaccard,
-                            y = factor(group, levels = rev(group_levels)))) +
-  geom_vline(xintercept = 0.5, linetype = 3, colour = "grey70") +
-  geom_point(size = 3, colour = "#2c7fb8") +
-  scale_x_continuous(limits = c(0,1), labels = percent_format(accuracy = 1)) +
-  labs(
-    title    = "Similarity between hillsides by group",
-    subtitle = "Jaccard index over species (genus-only records imputed)",
-    x        = "Similarity",
-    y        = NULL
-  ) +
-  theme_minimal(base_size = 12)
-
-p_jaccard_all
-
-# 6.5 Per-group "abundance" but as record counts, not individuals
+# 6.3 Per-group "abundance" but as record counts, not individuals
 # --- Grouped abundance function (records, not individualCount) ---
 
 plot_group_abundance <- function(df, grp_label, top_n = Inf) {
@@ -516,6 +463,7 @@ plot_group_abundance <- function(df, grp_label, top_n = Inf) {
               hjust = -0.1, size = 3.2) +
     coord_flip(clip = "off") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+    scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
     labs(
       title = paste0(grp_label, " — record-based abundance (species)"),
       subtitle = "Counts of sampling-event records per species",
@@ -526,6 +474,9 @@ plot_group_abundance <- function(df, grp_label, top_n = Inf) {
     theme_minimal(base_size = 12) +
     theme(
       legend.position = "top",
+      panel.grid = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
       axis.line = element_line(colour = "black"),
       axis.ticks = element_line()
     )
@@ -548,55 +499,78 @@ plots_grouped_abundance <- lapply(major_groups, function(g) {
 plots_grouped_abundance
 
 
-#----overall abundance plot----
-# ---- Total individuals per group, North vs South (log10, no 'Other') ----
+#----overall abundance plot WITH OVERALL GROUP----
 
+# 1. Compute abundance per group x hillside
 abund_group_ns <- assoc_use %>%
-  filter(group != "Other") %>%                      # ← remove "Other"
+  filter(group != "Other") %>%                      
   group_by(group, hillside) %>%
-  summarise(total_individuals = sum(individualCount, na.rm = TRUE),
-            .groups = "drop") %>%
-  filter(!is.na(group)) %>%
+  summarise(
+    total_individuals = sum(individualCount, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
   mutate(
-    hillside = factor(hillside, levels = c("North", "South")),
-    group = fct_reorder(group, total_individuals, .fun = sum)
+    hillside = factor(hillside, levels = c("North","South"))
   )
 
-# Log10 breaks that cover the whole range
-log_breaks <- scales::log_breaks()(range(abund_group_ns$total_individuals))
+# 2. Create "Overall" totals for each hillside
+overall_ns <- assoc_use %>%
+  filter(group != "Other") %>%
+  group_by(hillside) %>%
+  summarise(
+    total_individuals = sum(individualCount, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    group = "Overall",
+    hillside = factor(hillside, levels = c("North","South"))
+  )
 
-overall_abundance_plot <- ggplot(abund_group_ns,
+# 3. Bind rows + set factor order (groups then Overall last)
+abund_group_ns2 <- bind_rows(abund_group_ns, overall_ns) %>%
+  mutate(
+    group = factor(group,
+                   levels = c(
+                     sort(unique(abund_group_ns$group)),
+                     "Overall"
+                   ))
+  )
+
+# 4. Log breaks
+log_breaks <- scales::log_breaks()(range(abund_group_ns2$total_individuals))
+
+# 5. Plot
+overall_abundance_plot <- ggplot(abund_group_ns2,
                                  aes(x = group, y = total_individuals, fill = hillside)) +
   geom_col(position = position_dodge(width = 0.75), width = 0.65,
            colour = "white") +
-  
-  # ---- Label directly on top of each bar ----
-geom_text(
-  aes(label = total_individuals, y = total_individuals),
-  position = position_dodge(width = 0.75),
-  vjust = -0.4,        # ← vertical position: slightly above bar
-  size = 3.7,
-  colour = "black"
-) +
-  
+  geom_text(
+    aes(label = total_individuals),
+    position = position_dodge(width = 0.75),
+    vjust = -0.4,
+    size = 3.7,
+    colour = "black"
+  ) +
   scale_y_log10(
     breaks = log_breaks,
     labels = scales::comma_format(),
     expand = expansion(mult = c(0, 0.15))
   ) +
-  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
+  scale_fill_manual(values = c(
+    "North" = "#E76F51",
+    "South" = "#2A9D8F"
+  )) +
   labs(
-    title = "Total individuals recorded per group by Candidtae Site",
     x = "Group",
     y = "Total individuals (log10 scale)",
-    fill = "Region"
+    fill = "Candidate site"
   ) +
   theme_minimal(base_size = 13) +
   theme(
     axis.text.x = element_text(angle = 30, hjust = 1),
     axis.line = element_line(colour = "black"),
     axis.ticks = element_line(colour = "black"),
-    panel.grid.minor.y = element_blank(),
+    panel.grid = element_blank(),
     plot.title = element_text(face = "bold")
   )
 
@@ -712,7 +686,7 @@ region_heat <- assoc_use %>%
 
 common_scale <- scale_fill_gradient(
   low = "#d6e9f9",
-  high = "#08306b",
+  high = "#4C6FA3",
   name = "BMWP Score"
 )
 
@@ -736,10 +710,9 @@ plot_aspt <- ggplot(df, aes(x = x, y = ASPT, fill = hillside)) +
     expand = c(0, 0)
   ) +
   labs(
-    title = "ASPT by Site (Upstream & Downstream Grouped)",
     x = "Site",
     y = "ASPT Score",
-    fill = "Region"
+    fill = "Candidate site"
   ) +
   theme_minimal(base_size = 15) +
   theme(
@@ -749,6 +722,8 @@ plot_aspt <- ggplot(df, aes(x = x, y = ASPT, fill = hillside)) +
     axis.line.y = element_line(colour = "black", linewidth = 1),
     axis.ticks = element_line(colour = "black"),
     panel.grid = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
     plot.title = element_text(face = "bold", size = 18),
     legend.position = "right"
   )
@@ -765,8 +740,7 @@ heatmap_combined <- ggplot(region_heat,
             size = 4) +
   common_scale +
   labs(
-    title = "Aquatic Invertebrate BMWP & Abundance (North vs South)",
-    x = "Region",
+    x = "Candidate site",
     y = "Taxon (common name)"
   ) +
   theme_minimal(base_size = 15) +
@@ -776,6 +750,8 @@ heatmap_combined <- ggplot(region_heat,
     axis.line.x = element_line(colour = "black"),
     axis.line.y = element_line(colour = "black"),
     panel.grid = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
     plot.title = element_text(face = "bold", size = 18),
     legend.position = "right"
   )
@@ -863,18 +839,23 @@ habitat_scaled <- habitat_quality %>%
     moisture      = moisture_raw   / max(moisture_raw,   na.rm = TRUE),
     trophic       = trophic_raw    / max(trophic_raw,    na.rm = TRUE),
     saproxylic    = saproxylic_raw / max(saproxylic_raw, na.rm = TRUE),
-    habitat_total = habitat_raw    / max(habitat_raw,    na.rm = TRUE)
+    Average       = habitat_raw    / max(habitat_raw,    na.rm = TRUE)   # renamed
   ) %>%
-  select(hillside, woodland, moisture, trophic, saproxylic, habitat_total)
+  select(hillside, woodland, moisture, trophic, saproxylic, Average)      # reordered
 
 hab_plot <- habitat_scaled %>%
   pivot_longer(
     cols = -hillside,
     names_to = "metric",
     values_to = "score"
+  ) %>%
+  mutate(
+    metric = factor(metric, 
+                    levels = c("woodland", "moisture", "trophic", 
+                               "saproxylic", "Average"))  # Average moved to end
   )
 
-# ---- Terrestrial Invertebrate Plot with Solid Axes + Non-Overlapping Bars ----
+# ---- Terrestrial Invertebrate Plot with Solid Axes ----
 
 p_terrestrial <- ggplot(hab_plot,
                         aes(x = metric, y = score, fill = hillside)) +
@@ -888,16 +869,15 @@ p_terrestrial <- ggplot(hab_plot,
     vjust = -0.2,
     size = 4
   ) +
-  scale_fill_manual(values = c("North" = "#D55E00", "South" = "#0072B2")) +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
   scale_y_continuous(
     limits = c(0, 1.05),
     expand = c(0, 0)
   ) +
   labs(
-    title = "Terrestrial Invertebrate Habitat-Quality Metrics",
-    x = "Metrics for Environmental Quality",
+    x = "Metrics for environmental quality",
     y = "Scaled score (0–1)",
-    fill = "Candidate Site"
+    fill = "Candidate site"
   ) +
   theme_minimal(base_size = 15) +
   theme(
@@ -908,13 +888,9 @@ p_terrestrial <- ggplot(hab_plot,
   )
 
 p_terrestrial
+
 # ---- Environmental Comparison Plot with Solid Axes + Non-Overlapping Bars ----
 # ---- Build Moth Air-Quality (Nitrogen Pollution) Score ----
-
-# expects assoc_use with:
-# - group == "Terrestrial invertebrates" for inverts
-# - BUT moths are in group == "Terrestrial invertebrates" *or* "Other"
-# better: detect Lepidoptera directly
 
 moth_data <- assoc_use %>%
   filter(
@@ -939,7 +915,6 @@ air_quality <- moth_data %>%
     score_raw = sum(air_weighted, na.rm = TRUE),
     .groups = "drop"
   )
-
 
 combined_scores_raw <- air_quality %>%
   rename(air_raw = score_raw) %>%
@@ -1014,7 +989,6 @@ plot_scores <- scaled_scores %>%
     values_to = "scaled_score"
   )
 
-
 p_all_env <- ggplot(
   plot_scores,
   aes(x = test, y = scaled_score, fill = hillside)
@@ -1029,27 +1003,28 @@ p_all_env <- ggplot(
     vjust = -0.2,
     size = 4
   ) +
-  scale_fill_manual(values = c("North" = "#D55E00", "South" = "#0072B2")) +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
   scale_y_continuous(
     limits = c(0, 1.05),
     expand = c(0, 0)
   ) +
   labs(
-    title = "Environmental Quality Scores from Invertebrate Groups",
-    x = "Environmental Quality Metric",
+    x = "Environmental quality metric",
     y = "Scaled score (0–1)",
-    fill = "Candidate Site"
+    fill = "Candidate site"
   ) +
   theme_minimal(base_size = 15) +
   theme(
     axis.text.x = element_text(angle = 20, hjust = 1),
     panel.grid = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
     axis.line.x = element_line(colour = "black", linewidth = 1),
     axis.line.y = element_line(colour = "black", linewidth = 1)
   )
+
 p_terrestrial
 p_all_env
-
 # ---- Birds: BoCC5 lists ----
 bocc5_part1 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
@@ -1604,33 +1579,48 @@ heat <- dat %>%
     )
   )
 
+# ---- Clean common names for heatmap ----
+heat <- heat %>%
+  mutate(
+    common_name_clean = species_label %>%
+      str_replace_all("_", " ") %>%   # remove underscores if present
+      str_squish() %>%                # clean whitespace
+      str_to_title()                  # make readable
+  )
+
+
+# ---- Colour palette ----
 pal_comp <- c(
   "Amber"        = "#FFB000",
   "Red"          = "#C1121F",
-  "EPS"          = "#2D6A4F",
-  "Protected"    = "#40916C",
-  "SBL Priority" = "#74C69D",
+  "EPS"          = "#1B9E77",
+  "Protected"    = "#7570B3",
+  "SBL Priority" = "#E7298A",
   "Other"        = "grey80"
 )
 
-fig_heatmapimportant <- ggplot(heat, aes(x = region, y = species_label)) +
+# ---- Heatmap using common names ----
+fig_heatmapimportant <- ggplot(heat, aes(x = region, y = common_name_clean)) +
   geom_tile(aes(fill = category),
-            color = "grey80",
+            color = "grey",
             linewidth = 0.35) +
   geom_text(aes(label = n_records),
             color = "black",
             size = 3.6,
             fontface = "bold") +
   facet_wrap(~ group, scales = "free_y", ncol = 1, strip.position = "top") +
-  scale_fill_manual(values = pal_comp, name = "Category") +
+  scale_fill_manual(values = pal_comp, name = "Conservation Status") +
   labs(
-    title = "Species–region heatmap of important abundance",
-    subtitle = "Tile colour shows conservation/protection; numbers are summed individualCount",
-    x = "Region",
-    y = "Species"
+    title = "Conservation Concern Species Heatmap",
+    x = "Candidate Site",
+    y = "Species (Common Names)"
   ) +
   theme_ecia() +
   theme(
+    # REMOVE ALL GREY PANEL LINES
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    
     axis.line.x = element_line(colour = "black", linewidth = 0.4),
     axis.line.y = element_line(colour = "black", linewidth = 0.4),
     axis.ticks = element_line(colour = "black"),
@@ -1649,6 +1639,10 @@ fig_heatmapimportant <- ggplot(heat, aes(x = region, y = species_label)) +
   )
 
 fig_heatmapimportant
+
+
+
+
 
 # ---- Plot: Bird BoCC composition (richness, not abundance) ----
 
@@ -1675,8 +1669,8 @@ fig_bocc_comp_counts <- ggplot(birds_comp_counts, aes(region, n, fill = status))
   scale_fill_manual(values = pal_bocc) +
   scale_y_continuous(expand = expansion(mult = c(0, .1))) +
   labs(
-    title = "Important bird species by BoCC status and region",
-    x = "Region", y = "Number of important bird species", fill = "BoCC status"
+    title = "Bird Species of Conservation Concern",
+    x = "Candidate Site", y = "Number of Bird species", fill = "BoCC status"
   ) +
   theme_ecia()
 
@@ -1754,11 +1748,11 @@ comp_totals <- comp_all %>%
   summarise(total = sum(n), .groups = "drop")
 
 pal_comp2 <- c(
-  "Amber" = "#FFB000",
-  "Red" = "#C1121F",
-  "EPS" = "#2D6A4F",
-  "Protected" = "#40916C",
-  "SBL Priority" = "#74C69D"
+  "Red"          = "#C1121F",   # danger / high concern
+  "Amber"        = "#FFB000",   # caution / medium concern
+  "EPS"          = "#1B9E77",   # teal
+  "Protected"    = "#7570B3"   # purple
+  
 )
 
 fig_comp_combinedimportantbyregionandstatus <- ggplot(comp_all, aes(region, n, fill = category)) +
@@ -1788,14 +1782,17 @@ fig_comp_combinedimportantbyregionandstatus <- ggplot(comp_all, aes(region, n, f
     expand = expansion(mult = c(0, 0.12))
   ) +
   labs(
-    title = "Composition of important species by region",
-    subtitle = "Richness of species by conservation/protection category",
-    x = "Region",
-    y = "Number of important species",
-    fill = "Category"
+    title = "Richness of concern species between candidate sites",
+    x = "Candidate site",
+    y = "Number of species",
+    fill = "Conservation status"
   ) +
   theme_ecia() +
   theme(
+    # REMOVE ALL GREY GRIDLINES
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    
     axis.line = element_line(colour = "black", linewidth = 0.4),
     axis.ticks = element_line(colour = "black"),
     axis.text.x = element_text(angle = 45, hjust = 1, size = 10, colour = "black"),
@@ -1814,6 +1811,7 @@ fig_comp_combinedimportantbyregionandstatus
 
 
 
+
 # ---- Plots for report ----
 p_rich_all
 p_diverge_final
@@ -1822,9 +1820,8 @@ plot_aspt
 heatmap_combined
 p_terrestrial
 p_all_env
-fig_abundanceimportant
-fig_richnessimportant
-fig_heatmapimportant #need to change so all use common name
+fig_abundanceimportant #probably wont use
+fig_heatmapimportant 
 fig_comp_combinedimportantbyregionandstatus
 
 
