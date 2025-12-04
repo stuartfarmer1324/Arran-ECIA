@@ -55,7 +55,7 @@ if (file.exists(occurs_path)) {
     individualCount = c(3, 5, 1, 2, 10, 8, 4, 6)
   )
 }
-
+assoc
 # ---- Standardise fields ----
 
 assoc <- assoc %>%
@@ -110,7 +110,7 @@ extract_genus <- function(x) {
 # Helper: detect binomial species names
 is_binomial <- function(x) {
   x <- str_trim(x)
-  pattern <- "^[A-Z][a-z]+\\s+[a-z][a-z\\-]+$"
+  pattern <- "^[A-Za-z]+\\s+[A-Za-z\\-]+$"
   valid_species <- str_detect(x, pattern)
   flagged_terms <- str_detect(
     x,
@@ -118,6 +118,7 @@ is_binomial <- function(x) {
   )
   valid_species & !flagged_terms
 }
+
 
 # Helper: simple common-name stemmer for inverts / fuzzy things
 stem_common <- function(name_raw) {
@@ -322,7 +323,7 @@ p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
   geom_text(aes(label = n_species),
             position = hillside_dodge,
             hjust = -0.2, size = 3.8, colour = "grey20") +
-  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#0072B2")) +
   scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
   labs(
     title    = "Richness by sampled group and hillside",
@@ -386,7 +387,7 @@ p_diverge_final <- ggplot(df_div, aes(y = group)) +
   ) +
   scale_fill_manual(values = c(
     "North" = "#E76F51",
-    "South" = "#2A9D8F",
+    "South" = "#0072B2",
     "Tie"   = "grey80"
   )) +
   scale_x_continuous(
@@ -463,7 +464,7 @@ plot_group_abundance <- function(df, grp_label, top_n = Inf) {
               hjust = -0.1, size = 3.2) +
     coord_flip(clip = "off") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
-    scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
+    scale_fill_manual(values = c("North" = "#E76F51", "South" = "#0072B2")) +
     labs(
       title = paste0(grp_label, " — record-based abundance (species)"),
       subtitle = "Counts of sampling-event records per species",
@@ -558,7 +559,7 @@ overall_abundance_plot <- ggplot(abund_group_ns2,
   ) +
   scale_fill_manual(values = c(
     "North" = "#E76F51",
-    "South" = "#2A9D8F"
+    "South" = "#0072B2"
   )) +
   labs(
     x = "Group",
@@ -699,7 +700,7 @@ plot_aspt <- ggplot(df, aes(x = x, y = ASPT, fill = hillside)) +
     fontface = ifelse(df$is_total, "bold", "plain"),
     size = 4
   ) +
-  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#0072B2")) +
   scale_x_continuous(
     breaks = df$x,
     labels = df$label,
@@ -869,7 +870,7 @@ p_terrestrial <- ggplot(hab_plot,
     vjust = -0.2,
     size = 4
   ) +
-  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#0072B2")) +
   scale_y_continuous(
     limits = c(0, 1.05),
     expand = c(0, 0)
@@ -892,6 +893,60 @@ p_terrestrial
 # ---- Environmental Comparison Plot with Solid Axes + Non-Overlapping Bars ----
 # ---- Build Moth Air-Quality (Nitrogen Pollution) Score ----
 # ---- Moth nitrogen air-quality score ----
+# ---- UK Nitrogen Sensitivity Classification ----
+# ---- Species name standardisation table ----
+name_corrections <- tribble(
+  ~raw,                   ~clean,
+  "autuml rustic",        "autumn rustic",
+  "autumn rustic",        "autumn rustic",
+  "black rustic",         "black rustic",
+  "square spot rustic",   "square spot rustic",
+  "drinker moth",         "drinker moth",
+  "garden dart",          "garden dart",
+  "chestnut moth",        "chestnut moth",
+  "dark arches",          "dark arches",
+  
+  # tolerant species
+  "common marbled carpet", "common marbled carpet",
+  "green carpet moth",     "green carpet moth",
+  "marbled carpet",        "marbled carpet",
+  "footman",               "footman",
+  "footman moth",          "footman",
+  "pug",                   "pug",
+  "pug moth",              "pug",
+  
+  # neutral / other
+  "caterpillar",           "caterpillar",
+  "larva",                 "caterpillar",
+  "crane fly",             "crane fly",
+  "convolvulus hawk moth", "convolvulus hawk moth"
+)
+
+sensitive_species <- c(
+  "drinker moth",
+  "black rustic",
+  "square spot rustic",
+  "garden dart",
+  "chestnut moth",
+  "autumn rustic",
+  "dark arches",
+  "shuttle-shaped dart"
+)
+
+tolerant_species <- c(
+  "common marbled carpet",
+  "green carpet moth",
+  "marbled carpet",
+  "footman",
+  "pug"
+)
+
+# scoring:
+# 3 = sensitive (good)
+# 2 = neutral
+# 1 = tolerant (bad)
+
+# ---- Robust nitrogen scoring with automatic name correction ----
 
 moth_data <- assoc_use %>%
   filter(
@@ -900,14 +955,25 @@ moth_data <- assoc_use %>%
     individualCount > 0
   ) %>%
   mutate(
-    cname_lc = tolower(common_name),
+    cname_lc = tolower(common_name)
+  ) %>%
+  # apply name corrections
+  left_join(name_corrections,
+            by = c("cname_lc" = "raw")) %>%
+  mutate(
+    clean_name = coalesce(clean, cname_lc),
+    
     nitrogen_score = case_when(
-      str_detect(cname_lc, "yellow shell|shaded broad-bar|grass moth") ~ 1,
-      str_detect(cname_lc, "carpet|pug|footman") ~ 2,
-      TRUE ~ 3
+      clean_name %in% sensitive_species ~ 3,   # sensitive = high score
+      clean_name %in% tolerant_species ~ 1,    # tolerant = low score
+      TRUE ~ 2                                 # neutral
     ),
+    
     air_weighted = nitrogen_score * log1p(individualCount)
   )
+
+
+
 
 air_quality <- moth_data %>%
   group_by(hillside) %>%
@@ -1012,7 +1078,7 @@ p_all_env <- ggplot(
     vjust = -0.2,
     size = 4
   ) +
-  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#2A9D8F")) +
+  scale_fill_manual(values = c("North" = "#E76F51", "South" = "#0072B2")) +
   scale_y_continuous(
     limits = c(0, 1.05),
     expand = c(0, 0)
@@ -1033,6 +1099,10 @@ p_all_env <- ggplot(
   )
 
 p_all_env
+
+
+
+
 # ---- Birds: BoCC5 lists ----
 bocc5_part1 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
@@ -1044,6 +1114,7 @@ bocc5_part1 <- tribble(
   "yellow wagtail", "motacilla flava", "Red", "Passeriformes", "Motacillidae",
   "starling", "sturnus vulgaris", "Red", "Passeriformes", "Sturnidae",
   "mistle thrush", "turdus viscivorus", "Red", "Passeriformes", "Turdidae",
+  "kestrel", "falco tinnunculus", "Red", "Falconiformes", "Falconidae",
   "song thrush", "turdus philomelos", "Red", "Passeriformes", "Turdidae",
   "fieldfare", "turdus pilaris", "Red", "Passeriformes", "Turdidae",
   "redwing", "turdus iliacus", "Red", "Passeriformes", "Turdidae",
@@ -1064,7 +1135,6 @@ bocc5_part1 <- tribble(
   "osprey", "pandion haliaetus", "Red", "Accipitriformes", "Pandionidae",
   
   # AMBER LIST BEGIN
-  "meadow pipit", "anthus pratensis", "Amber", "Passeriformes", "Motacillidae",
   "rock pipit", "anthus petrosus", "Amber", "Passeriformes", "Motacillidae",
   "grey wagtail", "motacilla cinerea", "Amber", "Passeriformes", "Motacillidae",
   "robin", "erithacus rubecula", "Amber", "Passeriformes", "Muscicapidae",
@@ -1414,9 +1484,12 @@ lookup_all <- bind_rows(
 
 synonyms <- tribble(
   ~common_name_obs,        ~common_name_std,
+  "common kestrel",        "kestrel",
   "peregrine",             "peregrine falcon",
   "nathusius pipistrelle", "nathusius' pipistrelle"
 )
+
+
 
 assoc_imp <- assoc %>%
   mutate(
@@ -1465,7 +1538,7 @@ dat <- important_species_all %>%
     species_label = str_to_title(common_name)  # human-friendly
   )
 
-pal_region <- c("North" = "#E76F51", "South" = "#2A9D8F") %>%
+pal_region <- c("North" = "#E76F51", "South" = "#0072B2") %>%
   { .[intersect(names(.), levels(dat$region))] }
 pal_bocc   <- c("Red" = "#C1121F", "Amber" = "#FFB000")
 
@@ -1586,6 +1659,7 @@ heat <- dat %>%
       levels = c("SBL Priority", "Protected", "EPS", "Amber", "Red", "Other")
     )
   )
+heat
 
 # ---- Clean common names for heatmap ----
 heat <- heat %>%
@@ -1833,10 +1907,22 @@ fig_heatmapimportant
 fig_comp_combinedimportantbyregionandstatus
 
 #----finalised plots for report----
+setwd("C:/Users/stuar/Documents/Masters/Arran/R script/Arran field course/Final plots")
 
 #figure 1
 p_diverge_final
 overall_abundance_plot
+
+#Saving
+library(ggplot2)
+ggsave("p_diverge_final_A4_half.png",
+       plot = p_diverge_final,
+       width = 5.8, height = 8.27, units = "in", dpi = 300)
+
+ggsave("overall_abundance_plot_A4_half.png",
+       plot = overall_abundance_plot,
+       width = 5.8, height = 8.27, units = "in", dpi = 300)
+
 
 
 #Figure 2
@@ -1848,3 +1934,7 @@ p_all_env
 #Figure 3
 fig_heatmapimportant 
 fig_comp_combinedimportantbyregionandstatus
+
+
+
+
