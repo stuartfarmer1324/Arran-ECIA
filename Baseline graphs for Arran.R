@@ -1917,11 +1917,11 @@ overall_abundance_plot
 library(ggplot2)
 ggsave("p_diverge_final_A4_half.png",
        plot = p_diverge_final,
-       width = 5.8, height = 8.27, units = "in", dpi = 300)
+       width = 8, height = 5, units = "in", dpi = 600)
 
 ggsave("overall_abundance_plot_A4_half.png",
        plot = overall_abundance_plot,
-       width = 5.8, height = 8.27, units = "in", dpi = 300)
+       width = 8, height = 5, units = "in", dpi = 600)
 
 
 
