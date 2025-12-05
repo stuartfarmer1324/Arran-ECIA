@@ -229,7 +229,7 @@ assoc_use <- assoc_use %>%
 
 mammal_orders      <- c("artiodactyla", "carnivora", "rodentia",
                         "lagomorpha", "eulipotyphla", "chiroptera")
-aquatic_orders     <- c("trichoptera","ephemeroptera","plecoptera",
+Freshwater_orders     <- c("trichoptera","ephemeroptera","plecoptera",
                         "odonata","anisoptera","zygoptera")
 terrestrial_orders <- c("lepidoptera","diptera","coleoptera","araneae",
                         "hymenoptera","hemiptera","thysanoptera","ixodida",
@@ -258,12 +258,12 @@ assoc_use <- assoc_use %>%
       # Birds
       str_detect(evid, bird_event_pat) ~ "Birds",
       
-      # Aquatic inverts
+      # Freshwater inverts
       str_detect(evid, "fi") |
-        str_detect(oname_lc, str_c(aquatic_orders, collapse = "|")) |
+        str_detect(oname_lc, str_c(Freshwater_orders, collapse = "|")) |
         str_detect(cname_lc,
                    "caddis|mayfly|stonefly|dragonfly|damselfly|boatman|diving beetle|dytisc|corix") ~
-        "Aquatic invertebrates",
+        "Freshwater invertebrates",
       
       # Mammals (non-bats)
       str_detect(oname_lc, str_c(setdiff(mammal_orders, "chiroptera"), collapse = "|")) ~ "Mammals",
@@ -289,7 +289,7 @@ oc_use <- assoc_use %>%
 # ---- All-taxa plots (richness / record-based, not abundance) ----
 
 group_levels <- c("Overall","Plants","Birds","Mammals","Bats",
-                  "Terrestrial invertebrates","Aquatic invertebrates")
+                  "Terrestrial invertebrates","Freshwater invertebrates")
 
 # 6.1 Richness by group (+ overall), North vs South
 rich_by_group <- oc_use %>%
@@ -585,7 +585,7 @@ major_groups <- c(
   "Bats",
   "Plants",
   "Terrestrial invertebrates",
-  "Aquatic invertebrates"
+  "Freshwater invertebrates"
 )
 
 plots_grouped_abundance <- lapply(major_groups, function(g) {
@@ -696,7 +696,7 @@ assoc_use <- assoc_use %>%
 
 fresh_inverts <- assoc_use %>%
   filter(
-    group == "Aquatic invertebrates",
+    group == "Freshwater invertebrates",
     !is.na(Pollutionscore),
     Pollutionscore > 0
   )
@@ -775,7 +775,7 @@ df <- df %>%
 
 # heatmap data – now grouped by common_name_title (policy-friendly labels)
 region_heat <- assoc_use %>%
-  filter(group == "Aquatic invertebrates") %>%
+  filter(group == "Freshwater invertebrates") %>%
   group_by(hillside, common_name_title) %>%
   summarise(
     abundance = sum(individualCount, na.rm = TRUE),
@@ -2014,14 +2014,7 @@ final_twopanel <- heat_no_legend | combined_with_legend +
 final_twopanel
 
 
-ggsave(
-  "priority species seen",
-  final_twopanel,
-  width = 16,
-  height = 8,
-  units = "in",
-  dpi = 1000
-)
+
 
 
 
@@ -2066,6 +2059,57 @@ p_all_env
 #Figure 3
 fig_heatmapimportant 
 fig_comp_combinedimportantbyregionandstatus
+
+
+
+
+
+
+# ---- Freshwater panel: heatmap + ASPT ----
+
+# Move x-axis label upward using negative margin
+heatmap_panel <- heatmap_combined +
+  theme(
+    legend.position = "bottom",
+    plot.margin = margin(5, 10, 0, 5),
+    axis.title.x = element_text(margin = margin(t = -5))  # pull label closer
+  )
+
+aspt_panel <- plot_aspt +
+  theme(
+    legend.position = "bottom",
+    plot.margin = margin(5, 5, 0, 10),
+    axis.title.x = element_text(margin = margin(t = -2))  # mild adjustment
+  )
+
+freshwater_panel <- heatmap_panel + aspt_panel +
+  plot_layout(
+    ncol   = 2,
+    widths = c(1, 1.4)
+  )
+
+freshwater_panel
+
+
+# ---- Save figure ----
+ggsave(
+  "Freshwater_panel_fixed.png",
+  freshwater_panel,
+  width = 11,
+  height = 7,
+  dpi = 600
+)
+
+freshwater_panel
+
+
+
+
+
+
+
+
+
 
 
 
