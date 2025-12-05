@@ -347,76 +347,172 @@ p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
 p_rich_all
 
 
-# 6.2 Diverging richness plot (South − North) by group
-df_div <- summ_diff %>%
-  mutate(
-    diff = South - North,
-    abs_diff = abs(diff),
-    direction = ifelse(diff > 0, "South",
-                       ifelse(diff < 0, "North", "Tie")),
-    group = fct_reorder(group, diff),
-    group = fct_relevel(group, "Overall", after = Inf)
-  )
 
-auto_breaks <- scales::pretty_breaks(5)(range(df_div$diff))
-forced_breaks <- sort(unique(c(auto_breaks, -6, 6)))
 
-p_diverge_final <- ggplot(df_div, aes(y = group)) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
-  geom_col(aes(x = diff, fill = direction),
-           width = 0.65, colour = "white") +
-  geom_text(
-    data = df_div %>% filter(diff < 0),
-    aes(x = diff - 0.25, label = paste0("N = ", North)),
-    hjust = 1, size = 3.6, colour = "grey20"
-  ) +
-  geom_text(
-    data = df_div %>% filter(diff > 0),
-    aes(x = diff + 0.25, label = paste0("S = ", South)),
-    hjust = 0, size = 3.6, colour = "grey20"
-  ) +
-  geom_text(
-    data = df_div %>% filter(diff < 0),
-    aes(x = 0.1, label = paste0("S = ", South)),
-    hjust = 0, size = 3.4, colour = "grey40"
-  ) +
-  geom_text(
-    data = df_div %>% filter(diff > 0),
-    aes(x = -0.1, label = paste0("N = ", North)),
-    hjust = 1, size = 3.4, colour = "grey40"
-  ) +
-  scale_fill_manual(values = c(
+
+#---- packages ----
+  
+library(tidyverse)
+library(patchwork)
+
+#---- shared colours and theme ----
+  
+  pal_diverge <- c(
     "North" = "#E76F51",
     "South" = "#0072B2",
-    "Tie"   = "grey80"
-  )) +
-  scale_x_continuous(
-    labels = abs,
-    breaks = forced_breaks,
-    expand = expansion(mult = c(0.12, 0.12))
-  ) +
-  labs(
-    x = "Difference in species richness ",
-    y = "Group",
-    fill = "Candidate site"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    legend.position = "right",
-    panel.grid = element_blank(),
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    axis.text.y = element_text(size = 12),
-    axis.text.x = element_text(size = 12),
-    plot.title = element_text(size = 14, face = "bold"),
-    plot.subtitle = element_text(size = 11, colour = "grey25"),
-    axis.line.x = element_line(colour = "grey40", linewidth = 0.6),
-    axis.ticks.x = element_line(colour = "grey40"),
-    axis.line.y = element_line(colour = "grey40", linewidth = 0.6),
-    axis.ticks.y = element_line(colour = "grey40")
+    "Tie" = "grey80"
   )
 
-p_diverge_final
+theme_diverge <- theme_minimal(base_size = 22) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 20),
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 17, colour = "black"),
+    axis.title = element_text(size = 20, face = "bold"),
+    axis.line = element_line(colour = "grey40"),
+    axis.ticks = element_line(colour = "grey40"),
+    plot.margin = margin(20, 60, 20, 20)
+  )
+
+#---- richness data ----
+  
+  df_div <- summ_diff %>%
+  mutate(
+    diff = South - North,
+    direction = case_when(
+      diff > 0 ~ "South",
+      diff < 0 ~ "North",
+      TRUE ~ "Tie"
+    ),
+    label_high = if_else(diff > 0, South, North),
+    label_low = if_else(diff > 0, North, South),
+    pos_high = diff + if_else(diff > 0, 0.25, -0.25),
+    group = fct_reorder(group, diff)
+  )
+
+breaks_rich <- seq(-8, 8, 2)
+
+#---- richness plot ----
+  
+  p_rich <- ggplot(df_div, aes(y = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_col(aes(x = diff, fill = direction), width = 0.65, colour = "white") +
+  geom_text(
+    aes(
+      x = pos_high,
+      label = label_high,
+      hjust = if_else(diff > 0, 0, 1)
+    ),
+    size = 5
+  ) +
+  geom_text(
+    aes(
+      x = if_else(diff > 0, -0.1, 0.1),
+      label = label_low,
+      hjust = if_else(diff > 0, 1, 0)
+    ),
+    size = 5,
+    colour = "grey20"
+  ) +
+  scale_fill_manual(values = pal_diverge) +
+  scale_x_continuous(
+    breaks = breaks_rich,
+    labels = abs(breaks_rich),
+    limits = c(-8, 8)
+  ) +
+  labs(
+    x = "Difference in richness",
+    y = "Group"
+  ) +
+  theme_diverge
+
+
+#---- abundance data ----
+  
+  df_abund <- abund_group_ns2 %>%
+  select(group, hillside, total_individuals) %>%
+  pivot_wider(names_from = hillside, values_from = total_individuals, values_fill = 0) %>%
+  mutate(
+    diff_raw = South - North,
+    diff = if_else(diff_raw == 0, 0,
+                   sign(diff_raw) * log10(abs(diff_raw))),
+    direction = case_when(
+      diff_raw > 0 ~ "South",
+      diff_raw < 0 ~ "North",
+      TRUE ~ "Tie"
+    ),
+    label_high = if_else(diff_raw > 0, South, North),
+    label_low = if_else(diff_raw > 0, North, South),
+    pos_high = diff + if_else(diff > 0, 0.08, -0.08),
+    zero_offset = if_else(diff_raw > 0, -0.05, 0.05),
+    group = fct_reorder(group, diff_raw)
+  )
+
+axis_raw <- c(-300, -100, -50, -20, -10, -5, 5, 10, 20, 50, 100, 300)
+axis_breaks <- sign(axis_raw) * log10(abs(axis_raw))
+axis_labels <- abs(axis_raw)
+
+#---- abundance plot ----
+  
+  p_abund <- ggplot(df_abund, aes(y = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_col(aes(x = diff, fill = direction), width = 0.65, colour = "white") +
+  geom_text(
+    aes(
+      x = pos_high,
+      label = label_high,
+      hjust = if_else(diff > 0, 0, 1)
+    ),
+    size = 5
+  ) +
+  geom_text(
+    aes(
+      x = zero_offset,
+      label = label_low,
+      hjust = if_else(diff_raw > 0, 1, 0)
+    ),
+    size = 5,
+    colour = "grey20"
+  ) +
+  scale_fill_manual(values = pal_diverge) +
+  scale_x_continuous(
+    breaks = axis_breaks,
+    labels = axis_labels,
+    limits = c(-2.8, 2.8)
+  ) +
+  labs(
+    x = "Difference in abundance (log10 scale)",
+    y = NULL
+  ) +
+  theme_diverge +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  )
+
+#---- combine ----
+  
+  combined_fig <- p_rich + p_abund +
+  plot_layout(ncol = 2, widths = c(1.0, 2.0), guides = "collect") &
+  theme(legend.position = "bottom")
+
+combined_fig
+
+#---- save ----
+  
+  ggsave(
+    "Figure_Richness_Abundance_Divergence_A4_final.png",
+    combined_fig,
+    width = 16,
+    height = 8,
+    units = "in",
+    dpi = 1000
+  )
+
+
 
 
 # 6.3 Per-group "abundance" but as record counts, not individuals
@@ -566,7 +662,7 @@ overall_abundance_plot <- ggplot(abund_group_ns2,
     y = "Total individuals (log10 scale)",
     fill = "Candidate site"
   ) +
-  theme_minimal(base_size = 13) +
+  theme_minimal(base_size = 14) +
   theme(
     axis.text.x = element_text(angle = 30, hjust = 1),
     axis.line = element_line(colour = "black"),
@@ -576,6 +672,12 @@ overall_abundance_plot <- ggplot(abund_group_ns2,
   )
 
 overall_abundance_plot
+
+
+
+
+
+
 
 
 #----Invertebrate environemntal quality indicators----
@@ -1688,39 +1790,41 @@ fig_heatmapimportant <- ggplot(heat, aes(x = region, y = common_name_clean)) +
             linewidth = 0.35) +
   geom_text(aes(label = n_records),
             color = "black",
-            size = 3.6,
+            size = 5,              # ⬅️ increased from 3.6
             fontface = "bold") +
   facet_wrap(~ group, scales = "free_y", ncol = 1, strip.position = "top") +
   scale_fill_manual(values = pal_comp, name = "Conservation Status") +
   labs(
-    title = "Conservation Concern Species Heatmap",
     x = "Candidate Site",
     y = "Species (Common Names)"
   ) +
   theme_ecia() +
   theme(
-    # REMOVE ALL GREY PANEL LINES
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     
     axis.line.x = element_line(colour = "black", linewidth = 0.4),
     axis.line.y = element_line(colour = "black", linewidth = 0.4),
     axis.ticks = element_line(colour = "black"),
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, colour = "black"),
-    axis.text.y = element_text(size = 10, colour = "black"),
-    axis.title.x = element_text(size = 11, face = "bold"),
-    axis.title.y = element_text(size = 11, face = "bold"),
+    
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14, colour = "black"),  # ⬅️ match right panel
+    axis.text.y = element_text(size = 14, colour = "black"),                         # ⬅️ match right panel
+    
+    axis.title.x = element_text(size = 18, face = "bold"),                           # ⬅️ match right panel
+    axis.title.y = element_text(size = 18, face = "bold"),
+    
+    strip.text   = element_text(size = 18, face = "bold"),                           # facet headers
+    
+    legend.title = element_text(size = 18, face = "bold"),                           # ⬅️ match right panel
+    legend.text  = element_text(size = 16),
+    
     panel.spacing.y = unit(1.2, "lines"),
-    strip.text = element_text(size = 11, face = "bold"),
-    plot.title = element_text(size = 14, face = "bold"),
-    plot.subtitle = element_text(size = 11, margin = margin(b = 10)),
-    legend.position = "right",
-    legend.title = element_text(size = 10, face = "bold"),
-    legend.text  = element_text(size = 9),
+    plot.title = element_text(size = 18, face = "bold"),
     plot.margin = margin(10, 15, 10, 10)
   )
 
 fig_heatmapimportant
+
 
 
 
@@ -1846,50 +1950,78 @@ fig_comp_combinedimportantbyregionandstatus <- ggplot(comp_all, aes(region, n, f
   geom_text(
     aes(label = ifelse(n > 0, n, "")),
     position = position_stack(vjust = 0.5),
-    size = 3.4,
+    size = 5,                     # ⬅️ increased from 3.4
     color = "black",
     fontface = "bold"
   ) +
   geom_text(
     data = comp_totals,
-    aes(region, total, label = paste0("Total species: ", total)),
+    aes(region, total, label = paste0("Total:", total)),
     vjust = -0.6,
-    size = 3.4,
+    size = 5,                     # ⬅️ increased from 3.4
     fontface = "bold",
     inherit.aes = FALSE
   ) +
   facet_wrap(~ group, ncol = 2, scales = "fixed") +
   scale_fill_manual(values = pal_comp2, drop = FALSE) +
-  scale_y_continuous(
-    expand = expansion(mult = c(0, 0.12))
-  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
   labs(
-    title = "Richness of concern species between candidate sites",
     x = "Candidate site",
     y = "Number of species",
     fill = "Conservation status"
   ) +
   theme_ecia() +
   theme(
-    # REMOVE ALL GREY GRIDLINES
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     
     axis.line = element_line(colour = "black", linewidth = 0.4),
     axis.ticks = element_line(colour = "black"),
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, colour = "black"),
-    axis.text.y = element_text(size = 10, colour = "black"),
-    axis.title = element_text(size = 11, face = "bold"),
-    strip.text = element_text(size = 11, face = "bold"),
-    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
-    legend.title = element_text(size = 10, face = "bold"),
-    legend.text = element_text(size = 9),
+    
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14, colour = "black"),  # ⬅️ increased
+    axis.text.y = element_text(size = 14, colour = "black"),                         # ⬅️ increased
+    
+    axis.title = element_text(size = 18, face = "bold"),                             # ⬅️ increased
+    strip.text = element_text(size = 18, face = "bold"),                             # ⬅️ increased
+    
+    legend.title = element_text(size = 18, face = "bold"),                           # ⬅️ increased
+    legend.text  = element_text(size = 16),                                           # ⬅️ increased
+    
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
     plot.margin = margin(10, 15, 10, 10)
   )
 
 fig_comp_combinedimportantbyregionandstatus
 
 
+# Remove legend from the heatmap
+heat_no_legend <- fig_heatmapimportant +
+  theme(legend.position = "none")
+
+# Keep legend in the combined richness plot
+combined_with_legend <- fig_comp_combinedimportantbyregionandstatus
+
+# Arrange side-by-side with patchwork
+final_twopanel <- heat_no_legend | combined_with_legend +
+  plot_annotation(
+    tag_levels = "A",
+    tag_suffix = "."
+  ) &
+  theme(
+    plot.tag = element_text(size = 30, face = "bold")
+  )
+
+final_twopanel
+
+
+ggsave(
+  "priority species seen",
+  final_twopanel,
+  width = 16,
+  height = 8,
+  units = "in",
+  dpi = 1000
+)
 
 
 
@@ -1917,7 +2049,7 @@ overall_abundance_plot
 library(ggplot2)
 ggsave("p_diverge_final_A4_half.png",
        plot = p_diverge_final,
-       width = 8, height = 5, units = "in", dpi = 600)
+       width = 4, height = 4, units = "in", dpi = 600)
 
 ggsave("overall_abundance_plot_A4_half.png",
        plot = overall_abundance_plot,
