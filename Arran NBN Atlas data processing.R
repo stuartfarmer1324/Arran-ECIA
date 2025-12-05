@@ -562,8 +562,6 @@ bocc5_part1 <- tribble(
   "golden eagle", "aquila chrysaetos", "Red", "Accipitriformes", "Accipitridae",
   "osprey", "pandion haliaetus", "Red", "Accipitriformes", "Pandionidae",
   # AMBER (subset)
-  "meadow pipit", "anthus pratensis", "Amber", "Passeriformes", "Motacillidae",
-  "rock pipit", "anthus petrosus", "Amber", "Passeriformes", "Motacillidae",
   "grey wagtail", "motacilla cinerea", "Amber", "Passeriformes", "Motacillidae",
   "robin", "erithacus rubecula", "Amber", "Passeriformes", "Muscicapidae",
   "dunnock", "prunella modularis", "Amber", "Passeriformes", "Prunellidae",
@@ -584,7 +582,6 @@ bocc5_part1 <- tribble(
   "siskin", "spinus spinus", "Amber", "Passeriformes", "Fringillidae",
   "goldfinch", "carduelis carduelis", "Amber", "Passeriformes", "Fringillidae",
   "greenfinch", "chloris chloris", "Amber", "Passeriformes", "Fringillidae",
-  "chaffinch", "fringilla coelebs", "Amber", "Passeriformes", "Fringillidae",
   "brambling", "fringilla montifringilla", "Amber", "Passeriformes", "Fringillidae",
   "jackdaw", "corvus monedula", "Amber", "Passeriformes", "Corvidae",
   "rook", "corvus frugilegus", "Amber", "Passeriformes", "Corvidae",
@@ -602,14 +599,14 @@ bocc5_part1 <- tribble(
   "woodcock", "scolopax rusticola", "Amber", "Charadriiformes", "Scolopacidae",
   "herring gull", "larus argentatus", "Amber", "Charadriiformes", "Laridae",
   "kittiwake", "rissa tridactyla", "Amber", "Charadriiformes", "Laridae",
-  "common gull", "larus canus", "Amber", "Charadriiformes", "Laridae"
+  "common gull", "larus canus", "Red", "Charadriiformes", "Laridae"
 )
 
 bocc5_part2 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
   "black-headed gull", "chroicocephalus ridibundus", "Amber", "Charadriiformes", "Laridae",
   "lesser black-backed gull", "larus fuscus", "Amber", "Charadriiformes", "Laridae",
-  "great black-backed gull", "larus marinus", "Amber", "Charadriiformes", "Laridae",
+  "great black-backed gull", "larus marinus", "Red", "Charadriiformes", "Laridae",
   "sandwich tern", "thalasseus sandvicensis", "Amber", "Charadriiformes", "Laridae",
   "common tern", "sterna hirundo", "Amber", "Charadriiformes", "Laridae",
   "arctic tern", "sterna paradisaea", "Amber", "Charadriiformes", "Laridae",
@@ -629,15 +626,12 @@ bocc5_part2 <- tribble(
   "buzzard", "buteo buteo", "Amber", "Accipitriformes", "Accipitridae",
   "red kite", "milvus milvus", "Amber", "Accipitriformes", "Accipitridae",
   "tawny owl", "strix aluco", "Amber", "Strigiformes", "Strigidae",
-  "barn owl", "tyto alba", "Amber", "Strigiformes", "Tytonidae",
   "long-eared owl", "asio otus", "Amber", "Strigiformes", "Strigidae",
   "short-eared owl", "asio flammeus", "Amber", "Strigiformes", "Strigidae",
   "wren", "troglodytes troglodytes", "Amber", "Passeriformes", "Troglodytidae",
   "great spotted woodpecker", "dendrocopos major", "Amber", "Piciformes", "Picidae",
   "green woodpecker", "picus viridis", "Amber", "Piciformes", "Picidae",
   "lesser spotted woodpecker", "dryobates minor", "Amber", "Piciformes", "Picidae",
-  "red grouse", "lagopus lagopus scotica", "Amber", "Galliformes", "Phasianidae",
-  "pheasant", "phasianus colchicus", "Amber", "Galliformes", "Phasianidae",
   "grey partridge", "perdix perdix", "Amber", "Galliformes", "Phasianidae",
   "grey heron", "ardea cinerea", "Amber", "Pelecaniformes", "Ardeidae",
   "little egret", "egretta garzetta", "Amber", "Pelecaniformes", "Ardeidae",
@@ -1310,38 +1304,24 @@ mammals_classified_site <- important_clean_site %>%
   ) %>%
   filter(!is.na(classification))
 
-p_imp_birds_candidate <- ggplot(
-  birds_classified_site,
-  aes(x = hillside, y = factor(species_display), fill = classification)
-) +
-  geom_tile(color = "white", linewidth = 0.4) +
-  scale_fill_manual(values = pal_all) +
-  labs(
-    x = "Candidate site",
-    y = "Species (common names)"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    panel.grid = element_blank(),
-    axis.line  = element_line(color = "black"),
-    axis.ticks = element_line(color = "black")
-  )
+# Remove legend AND remove x-axis label for birds
+fig_birds_nokey <- fig_birds_heatmap_aoi +
+  theme(legend.position = "none") +
+  xlab(NULL)
 
-p_imp_mammals_candidate <- ggplot(
-  mammals_classified_site,
-  aes(x = hillside, y = factor(species_display), fill = classification)
-) +
-  geom_tile(color = "white", linewidth = 0.4) +
-  scale_fill_manual(values = pal_all) +
-  labs(
-    x = "Candidate site",
-    y = "Species (common names)"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    panel.grid = element_blank(),
-    axis.line  = element_line(color = "black"),
-    axis.ticks = element_line(color = "black")
+# Mammal plot: remove legend only
+fig_mammals_nokey <- fig_mammals_heatmap_aoi +
+  theme(legend.position = "none")
+
+# Combine with proportional heights
+fig_birds_mammals_heatmap_aoi <-
+  plot_grid(
+    fig_birds_nokey,
+    fig_mammals_nokey,
+    ncol = 1,
+    align = "v",
+    axis = "lr",
+    rel_heights = c(n_birds, n_mammals)
   )
 
 # Overall richness
@@ -1377,3 +1357,113 @@ fig_mammals_heatmap_aoi
 # Candidate site heatmaps
 p_imp_birds_candidate
 p_imp_mammals_candidate
+
+#----Heatmap panelling----
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+
+## ---- Species counts ----
+n_birds <- 47
+n_mammals <- 15
+
+## ---- Modify bird plot: remove legend, x-label, x-ticks, x-line ----
+fig_birds_nokey <- fig_birds_heatmap_aoi +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank(),       # remove x-axis title
+    axis.text.x = element_blank(),        # remove x tick labels
+    axis.ticks.x = element_blank(),       # remove tick marks
+    axis.line.x = element_blank()         # remove x axis line
+  )
+
+## ---- Modify mammal plot: remove legend only ----
+fig_mammals_nokey <- fig_mammals_heatmap_aoi +
+  theme(
+    legend.position = "none"
+  )
+
+## ---- Combine with proportional heights ----
+fig_birds_mammals_heatmap_aoi <- plot_grid(
+  fig_birds_nokey,
+  fig_mammals_nokey,
+  ncol = 1,
+  align = "v",
+  axis = "lr",
+  rel_heights = c(n_birds, n_mammals)
+)
+
+fig_birds_mammals_heatmap_aoi
+
+## ---- Save final figure ----
+ggsave(
+  filename = "fig_birds_mammals_heatmap_aoi.png",
+  plot     = fig_birds_mammals_heatmap_aoi,
+  width    = 5,
+  height   = 9,
+  dpi      = 1000
+)
+
+
+
+p_imp_birds_candidate
+p_imp_mammals_candidate
+
+# candidate site now
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+
+## ---- Species counts ----
+n_birds <- 47
+n_mammals <- 7.5
+
+
+## ---- Modify bird plot: remove legend, x-label, x-ticks, x-line ----
+fig_birds_nokey <- p_imp_birds_candidate +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank(),       # remove x-axis title
+    axis.text.x = element_blank(),        # remove x tick labels
+    axis.ticks.x = element_blank(),       # remove tick marks
+    axis.line.x = element_blank()         # remove x axis line
+  )
+
+## ---- Modify mammal plot: remove legend only ----
+fig_mammals_nokey <- p_imp_mammals_candidate +
+  theme(
+    legend.position = "none"
+  )
+
+## ---- Get shared legend from one of the original plots ----
+legend_candidate <- get_legend(
+  p_imp_birds_candidate +
+    theme(
+      legend.position  = "bottom",
+      legend.direction = "horizontal"
+      # you can tweak legend.title/text sizes here if you like
+    )
+)
+
+## ---- Combine with proportional heights (panels + legend) ----
+fig_birds_mammals_heatmap_candidate <- plot_grid(
+  fig_birds_nokey,
+  fig_mammals_nokey,
+  legend_candidate,
+  ncol = 1,
+  align = "v",
+  axis = "lr",
+  rel_heights = c(n_birds, n_mammals, 5)   # small height for legend
+)
+
+fig_birds_mammals_heatmap_candidate
+
+## ---- Save final figure ----
+ggsave(
+  filename = "fig_birds_mammals_heatmap_candidate_site.png",
+  plot     = fig_birds_mammals_heatmap_candidate,
+  width    = 5,
+  height   = 6,
+  dpi      = 1000
+)
+

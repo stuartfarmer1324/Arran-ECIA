@@ -2104,6 +2104,133 @@ freshwater_panel
 
 
 
+library(tidyverse)
+library(patchwork)
+
+# -----------------------------------------------------------
+# COLOURS (same as AOI figure)
+# -----------------------------------------------------------
+pal_diverge <- c(
+  "North" = "#E76F51",
+  "South" = "#0072B2"
+)
+
+# -----------------------------------------------------------
+# 1) Candidate Site – FULL Richness
+# South should be to the RIGHT → diff = South - North
+# -----------------------------------------------------------
+df_cs_div <- tribble(
+  ~group, ~North, ~South,
+  "Amphibians",                1,   1,
+  "Birds",                    28,  20,
+  "Mammals",                   9,   6,
+  "Terrestrial invertebrates",226, 343,
+  "Fish",                      0,   3,
+  "Total",                   264, 373
+) %>%
+  mutate(
+    diff = South - North,
+    direction = if_else(diff > 0, "South", "North"),
+    label_high = if_else(direction == "South", South, North),
+    label_low  = if_else(direction == "South", North, South),
+    pos_high = diff + if_else(diff > 0, 25, -25),
+    group = fct_reorder(group, diff)
+  )
+
+# -----------------------------------------------------------
+# 2) Candidate Site – IMPORTANT Species
+# -----------------------------------------------------------
+df_imp_cs_div <- tribble(
+  ~group, ~North, ~South,
+  "Birds",         24, 17,
+  "Other mammals",  1,  1,
+  "Total",         25, 18
+) %>%
+  mutate(
+    diff = South - North,
+    direction = if_else(diff > 0, "South", "North"),
+    label_high = if_else(direction == "South", South, North),
+    label_low  = if_else(direction == "South", North, South),
+    pos_high = diff + if_else(diff > 0, 0.6, -0.6),
+    group = fct_reorder(group, diff)
+  )
+
+# -----------------------------------------------------------
+# THEME
+# -----------------------------------------------------------
+theme_diverge <- theme_minimal(base_size = 20) +
+  theme(
+    panel.grid = element_blank(),
+    axis.title.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.x = element_line(colour = "black"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 18)
+  )
+
+# -----------------------------------------------------------
+# PLOT 1 — Candidate Site Richness
+# -----------------------------------------------------------
+p_cs_rich <- ggplot(df_cs_div, aes(y = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 1.1) +
+  geom_col(aes(x = diff, fill = direction), width = 0.55, colour = "white") +
+  geom_text(aes(x = pos_high, label = label_high),
+            size = 6.5, hjust = if_else(df_cs_div$diff > 0, 0, 1)) +
+  geom_text(aes(x = if_else(diff > 0, -30, 30), label = label_low),
+            size = 6.5, colour = "grey30",
+            hjust = if_else(df_cs_div$diff > 0, 1, 0)) +
+  scale_fill_manual(values = pal_diverge) +
+  scale_x_continuous(
+    limits = c(-60, 150),
+    breaks = seq(-60, 150, 30),
+    labels = abs(seq(-60, 150, 30)),
+    name = "Difference (South – North)"
+  ) +
+  labs(title = "Candidate site species richness by group") +
+  theme_diverge
+
+# -----------------------------------------------------------
+# PLOT 2 — Candidate Site Important Species
+# -----------------------------------------------------------
+p_cs_imp <- ggplot(df_imp_cs_div, aes(y = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 1.1) +
+  geom_col(aes(x = diff, fill = direction), width = 0.55, colour = "white") +
+  geom_text(aes(x = pos_high, label = label_high),
+            size = 6.5, hjust = if_else(df_imp_cs_div$diff > 0, 0, 1)) +
+  geom_text(aes(x = if_else(diff > 0, -0.7, 0.7), label = label_low),
+            size = 6.5, colour = "grey30",
+            hjust = if_else(df_imp_cs_div$diff > 0, 1, 0)) +
+  scale_fill_manual(values = pal_diverge) +   # ← FIXED HERE
+  scale_x_continuous(
+    limits = c(-8, 8),
+    breaks = seq(-8, 8, 2),
+    labels = abs(seq(-8, 8, 2)),
+    name = "Difference (South – North)"
+  ) +
+  labs(title = "Candidate site species of concern by group") +
+  theme_diverge
+
+# -----------------------------------------------------------
+# COMBINE SIDE-BY-SIDE
+# -----------------------------------------------------------
+combined_cs <- p_cs_rich + p_cs_imp +
+  plot_layout(ncol = 2, widths = c(1.3, 1), guides = "collect") &
+  theme(legend.position = "bottom") &
+  guides(fill = guide_legend(title = "Candidate site"))
+
+combined_cs
+
+# -----------------------------------------------------------
+# SAVE
+# -----------------------------------------------------------
+ggsave(
+  "CandidateSite_Richness_Important_Divergence_FINAL.png",
+  combined_cs,
+  width = 17,
+  height = 8,
+  dpi = 600
+)
 
 
 
