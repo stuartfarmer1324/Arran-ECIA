@@ -1,9 +1,10 @@
-# Arran biodiversity analysis + important species pipeline
+#---- Arran biodiversity analysis & important species pipeline ----
 # Uses associatedoccurences.csv as the data source
 # Imputes genus-only records to synthetic taxa without altering real species
 # Produces all-taxa summaries plus important-species extracts
 
-# ---- Libraries ----
+
+#---- Packages and checks ----
 
 required_pkgs <- c("tidyverse", "stringr", "fuzzyjoin", "stringdist", "forcats", "scales")
 missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
@@ -23,7 +24,8 @@ library(forcats)
 library(scales)
 # library(patchwork) # uncomment if you want multipanel layouts
 
-# ---- Load occurrences ----
+
+#---- Load occurrences ----
 
 occurs_path <- Sys.getenv(
   "OCCURS_PATH",
@@ -55,8 +57,11 @@ if (file.exists(occurs_path)) {
     individualCount = c(3, 5, 1, 2, 10, 8, 4, 6)
   )
 }
+
 assoc
-# ---- Standardise fields ----
+
+
+#---- Standardise fields ----
 
 assoc <- assoc %>%
   rename(
@@ -69,7 +74,7 @@ assoc <- assoc %>%
     scientific_raw    = str_squish(scientific_raw),
     common_name       = str_to_lower(common_name_raw),
     scientific_name   = str_to_lower(scientific_raw),
-    # NEW: title-case common name for policy-facing outputs
+    # Title-case version of common name for policy-facing outputs
     common_name_title = str_to_title(common_name_raw),
     
     kingdom           = str_to_sentence(str_squish(kingdom)),
@@ -78,10 +83,10 @@ assoc <- assoc %>%
     occurrence_status = str_to_sentence(str_squish(occurrenceStatus)),
     basis_of_record   = str_to_sentence(str_squish(basisOfRecord)),
     
-    # abundance: make sure it's numeric, treat missing as 0
+    # abundance: ensure numeric, treat missing as 0
     individualCount   = replace_na(as.numeric(individualCount), 0),
     
-    # Hillside / region (same thing, N vs S)
+    # Hillside / region (North vs South)
     region = case_when(
       str_starts(event_id, "N") ~ "North",
       str_starts(event_id, "S") ~ "South",
@@ -90,24 +95,17 @@ assoc <- assoc %>%
   )
 
 
-# ---- Genus → synthetic taxon imputation (hybrid sci + common name) ----
+#---- Helper functions: taxonomy & names ----
 
-# Helper: extract scientific genus if present
+# Extract genus from scientific name (if it looks like a valid Latin genus)
 extract_genus <- function(x) {
   x <- str_trim(x)
-  
-  # Extract first word
   genus <- word(x, 1)
-  
-  # TRUE for valid genera (capitalized Latin-like)
   is_valid <- str_detect(genus, "^[A-Z][a-z]+$")
-  
-  # Return genus if valid, otherwise NA
   ifelse(is_valid, genus, NA_character_)
 }
 
-
-# Helper: detect binomial species names
+# Detect binomial (two-part) scientific names and exclude "sp.", "spp", etc.
 is_binomial <- function(x) {
   x <- str_trim(x)
   pattern <- "^[A-Za-z]+\\s+[A-Za-z\\-]+$"
@@ -119,17 +117,14 @@ is_binomial <- function(x) {
   valid_species & !flagged_terms
 }
 
-
-# Helper: simple common-name stemmer for inverts / fuzzy things
+# Simple "stemmer" for common names (especially invertebrates)
 stem_common <- function(name_raw) {
-  # Make sure name_raw is character
   name_raw <- tolower(name_raw) %>% str_squish()
   
-  # If NA or empty -> return NA
   is_bad <- is.na(name_raw) | name_raw == ""
   name_raw[is_bad] <- NA_character_
   
-  # Strip qualifiers
+  # Remove stage/qualifier words
   name_raw <- str_replace_all(
     name_raw,
     regex("(larvae|larva|nymph|case|cased|caseless|adult|juvenile)", ignore_case = TRUE),
@@ -144,10 +139,8 @@ stem_common <- function(name_raw) {
   
   name_raw <- str_squish(name_raw)
   
-  # Extract first word core
   core <- word(name_raw, 1)
   
-  # Standardise a few common groups
   core <- case_when(
     core %in% c("caddis", "caddisfly") ~ "caddisfly",
     core %in% c("fly", "true")         ~ "fly",
@@ -158,16 +151,17 @@ stem_common <- function(name_raw) {
     TRUE ~ core
   )
   
-  # Replace empty strings with NA
   core[core == ""] <- NA_character_
   
   core
 }
 
 
+#---- Genus → synthetic taxon imputation ----
+
 assoc <- assoc %>%
   mutate(
-    # Clean scientific names
+    # Clean scientific names and normalise case
     sci_clean = case_when(
       !is.na(scientific_raw) & scientific_raw != "" &
         is_binomial(str_to_title(scientific_raw)) ~ str_to_title(scientific_raw),
@@ -181,8 +175,10 @@ assoc <- assoc %>%
     missing_epithet = (
       is.na(sci_epithet) |
         epithet_lc == "" |
-        str_detect(epithet_lc, regex("^(sp|spp|cf|aff|indet|unknown)$",
-                                     ignore_case = TRUE))
+        str_detect(
+          epithet_lc,
+          regex("^(sp|spp|cf|aff|indet|unknown)$", ignore_case = TRUE)
+        )
     ),
     
     # Common-name stem for cases with no reliable scientific genus
@@ -209,15 +205,14 @@ assoc <- assoc %>%
     )
   )
 
-# ---- Filter occurrences for analysis ----
+
+#---- Filter occurrences for analysis ----
 
 assoc_use <- assoc %>%
   filter(
     occurrence_status == "Present",
     !is.na(region)
-  )
-
-assoc_use <- assoc_use %>%
+  ) %>%
   mutate(
     Pollutionscore    = suppressWarnings(as.numeric(Pollutionscore)),
     event_id          = str_replace_all(event_id, " ", "_"),
@@ -225,11 +220,11 @@ assoc_use <- assoc_use %>%
   )
 
 
-# ---- Group assignment ----
+#---- Group assignment (Birds, Bats, Plants, Inverts, etc.) ----
 
 mammal_orders      <- c("artiodactyla", "carnivora", "rodentia",
                         "lagomorpha", "eulipotyphla", "chiroptera")
-Freshwater_orders     <- c("trichoptera","ephemeroptera","plecoptera",
+Freshwater_orders  <- c("trichoptera","ephemeroptera","plecoptera",
                         "odonata","anisoptera","zygoptera")
 terrestrial_orders <- c("lepidoptera","diptera","coleoptera","araneae",
                         "hymenoptera","hemiptera","thysanoptera","ixodida",
@@ -261,12 +256,16 @@ assoc_use <- assoc_use %>%
       # Freshwater inverts
       str_detect(evid, "fi") |
         str_detect(oname_lc, str_c(Freshwater_orders, collapse = "|")) |
-        str_detect(cname_lc,
-                   "caddis|mayfly|stonefly|dragonfly|damselfly|boatman|diving beetle|dytisc|corix") ~
-        "Freshwater invertebrates",
+        str_detect(
+          cname_lc,
+          "caddis|mayfly|stonefly|dragonfly|damselfly|boatman|diving beetle|dytisc|corix"
+        ) ~ "Freshwater invertebrates",
       
       # Mammals (non-bats)
-      str_detect(oname_lc, str_c(setdiff(mammal_orders, "chiroptera"), collapse = "|")) ~ "Mammals",
+      str_detect(
+        oname_lc,
+        str_c(setdiff(mammal_orders, "chiroptera"), collapse = "|")
+      ) ~ "Mammals",
       
       # Terrestrial inverts
       str_detect(oname_lc, str_c(terrestrial_orders, collapse = "|")) |
@@ -275,7 +274,7 @@ assoc_use <- assoc_use %>%
       TRUE ~ "Other"
     ),
     
-    hillside = region  # alias to keep old naming
+    hillside = region  # alias for old naming
   )
 
 # Only keep rows with usable taxon_unit
@@ -286,16 +285,18 @@ oc_use <- assoc_use %>%
     !str_detect(taxon_unit, regex("^no records|unidentified", ignore_case = TRUE))
   )
 
-# ---- All-taxa plots (richness / record-based, not abundance) ----
+
+#---- All-taxa richness (record-based, not abundance) ----
 
 group_levels <- c("Overall","Plants","Birds","Mammals","Bats",
                   "Terrestrial invertebrates","Freshwater invertebrates")
 
-# 6.1 Richness by group (+ overall), North vs South
+# Richness by group and hillside
 rich_by_group <- oc_use %>%
   group_by(group, hillside) %>%
   summarise(n_species = n_distinct(taxon_unit), .groups = "drop")
 
+# Overall richness per hillside
 rich_overall <- oc_use %>%
   group_by(hillside) %>%
   summarise(n_species = n_distinct(taxon_unit), .groups = "drop") %>%
@@ -312,17 +313,22 @@ plot_dat <- bind_rows(rich_by_group, rich_overall) %>%
 summ_diff <- plot_dat %>%
   select(group, hillside, n_species) %>%
   tidyr::complete(group, hillside, fill = list(n_species = 0)) %>%
-  tidyr::pivot_wider(names_from = hillside, values_from = n_species,
-                     values_fill = 0) %>%
+  tidyr::pivot_wider(
+    names_from = hillside,
+    values_from = n_species,
+    values_fill = 0
+  ) %>%
   mutate(group = factor(group, levels = group_levels))
 
 hillside_dodge <- position_dodge(width = 0.75)
 
 p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
   geom_col(position = hillside_dodge, width = 0.7, colour = "white") +
-  geom_text(aes(label = n_species),
-            position = hillside_dodge,
-            hjust = -0.2, size = 3.8, colour = "grey20") +
+  geom_text(
+    aes(label = n_species),
+    position = hillside_dodge,
+    hjust = -0.2, size = 3.8, colour = "grey20"
+  ) +
   scale_fill_manual(values = c("North" = "#E76F51", "South" = "#0072B2")) +
   scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
   labs(
@@ -347,21 +353,16 @@ p_rich_all <- ggplot(plot_dat, aes(x = n_species, y = group, fill = hillside)) +
 p_rich_all
 
 
+#---- Divergence plots: shared palettes & themes ----
 
-
-
-#---- packages ----
-  
 library(tidyverse)
 library(patchwork)
 
-#---- shared colours and theme ----
-  
-  pal_diverge <- c(
-    "North" = "#E76F51",
-    "South" = "#0072B2",
-    "Tie" = "grey80"
-  )
+pal_diverge <- c(
+  "North" = "#E76F51",
+  "South" = "#0072B2",
+  "Tie"   = "grey80"
+)
 
 theme_diverge <- theme_minimal(base_size = 22) +
   theme(
@@ -376,9 +377,10 @@ theme_diverge <- theme_minimal(base_size = 22) +
     plot.margin = margin(20, 60, 20, 20)
   )
 
-#---- richness data ----
-  
-  df_div <- summ_diff %>%
+
+#---- Richness divergence data & plot ----
+
+df_div <- summ_diff %>%
   mutate(
     diff = South - North,
     direction = case_when(
@@ -387,16 +389,14 @@ theme_diverge <- theme_minimal(base_size = 22) +
       TRUE ~ "Tie"
     ),
     label_high = if_else(diff > 0, South, North),
-    label_low = if_else(diff > 0, North, South),
-    pos_high = diff + if_else(diff > 0, 0.25, -0.25),
-    group = fct_reorder(group, diff)
+    label_low  = if_else(diff > 0, North, South),
+    pos_high   = diff + if_else(diff > 0, 0.25, -0.25),
+    group      = fct_reorder(group, diff)
   )
 
 breaks_rich <- seq(-8, 8, 2)
 
-#---- richness plot ----
-  
-  p_rich <- ggplot(df_div, aes(y = group)) +
+p_rich <- ggplot(df_div, aes(y = group)) +
   geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
   geom_col(aes(x = diff, fill = direction), width = 0.65, colour = "white") +
   geom_text(
@@ -428,35 +428,97 @@ breaks_rich <- seq(-8, 8, 2)
   ) +
   theme_diverge
 
+p_rich
 
-#---- abundance data ----
-  
-  df_abund <- abund_group_ns2 %>%
+
+#---- Abundance divergence (using abund_group_ns later) ----
+# NOTE: abund_group_ns is defined further down; in practice you'd
+# move that definition above this section for a fully self-contained script.
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+
+# Shared group order from richness divergence, with "Overall" at top
+group_levels_shared <- df_div$group |> unique()
+group_levels_shared <- c("Overall", setdiff(group_levels_shared, "Overall"))
+
+# Ensure df_div uses shared group order
+df_div <- df_div %>%
+  mutate(group = factor(group, levels = group_levels_shared))
+
+p_rich <- ggplot(df_div, aes(y = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_col(aes(x = diff, fill = direction), width = 0.65, colour = "white") +
+  geom_text(
+    aes(
+      x = pos_high,
+      label = label_high,
+      hjust = if_else(diff > 0, 0, 1)
+    ),
+    size = 5
+  ) +
+  geom_text(
+    aes(
+      x = if_else(diff > 0, -0.1, 0.1),
+      label = label_low,
+      hjust = if_else(diff > 0, 1, 0)
+    ),
+    size = 5,
+    colour = "grey20"
+  ) +
+  scale_fill_manual(values = pal_diverge) +
+  scale_x_continuous(
+    limits = c(-8, 8),
+    breaks = seq(-8, 8, by = 2),
+    labels = abs(seq(-8, 8, by = 2))
+  ) +
+  labs(x = "Difference in richness", y = "Group") +
+  theme_diverge +
+  labs(tag = "a)")
+
+p_rich
+
+
+#---- Abundance divergence data (requires abund_group_ns) ----
+
+overall_abundance <- abund_group_ns %>%   # abund_group_ns defined later in script
+  group_by(hillside) %>%
+  summarise(total_individuals = sum(total_individuals, na.rm = TRUE)) %>%
+  mutate(group = "Overall") %>%
+  select(group, hillside, total_individuals)
+
+abund_group_ns_with_overall <- abund_group_ns %>%
+  bind_rows(overall_abundance)
+
+df_abund <- abund_group_ns_with_overall %>%
   select(group, hillside, total_individuals) %>%
-  pivot_wider(names_from = hillside, values_from = total_individuals, values_fill = 0) %>%
+  pivot_wider(
+    names_from = hillside,
+    values_from = total_individuals,
+    values_fill = 0
+  ) %>%
   mutate(
     diff_raw = South - North,
-    diff = if_else(diff_raw == 0, 0,
-                   sign(diff_raw) * log10(abs(diff_raw))),
+    diff = diff_raw,
     direction = case_when(
       diff_raw > 0 ~ "South",
       diff_raw < 0 ~ "North",
       TRUE ~ "Tie"
     ),
     label_high = if_else(diff_raw > 0, South, North),
-    label_low = if_else(diff_raw > 0, North, South),
-    pos_high = diff + if_else(diff > 0, 0.08, -0.08),
-    zero_offset = if_else(diff_raw > 0, -0.05, 0.05),
-    group = fct_reorder(group, diff_raw)
+    label_low  = if_else(diff_raw > 0, North, South),
+    pos_high   = diff + if_else(diff > 0, 10, -10),
+    zero_offset = 0,
+    group = factor(group, levels = group_levels_shared)
   )
 
-axis_raw <- c(-300, -100, -50, -20, -10, -5, 5, 10, 20, 50, 100, 300)
-axis_breaks <- sign(axis_raw) * log10(abs(axis_raw))
-axis_labels <- abs(axis_raw)
+abund_max <- max(abs(df_abund$diff_raw), na.rm = TRUE)
+axis_breaks <- pretty(c(-abund_max, abund_max), n = 6)
 
-#---- abundance plot ----
-  
-  p_abund <- ggplot(df_abund, aes(y = group)) +
+p_abund <- ggplot(df_abund, aes(y = group)) +
+  scale_y_discrete(drop = FALSE) +
   geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
   geom_col(aes(x = diff, fill = direction), width = 0.65, colour = "white") +
   geom_text(
@@ -479,44 +541,43 @@ axis_labels <- abs(axis_raw)
   scale_fill_manual(values = pal_diverge) +
   scale_x_continuous(
     breaks = axis_breaks,
-    labels = axis_labels,
-    limits = c(-2.8, 2.8)
+    labels = abs(axis_breaks),
+    limits = range(axis_breaks)
   ) +
-  labs(
-    x = "Difference in abundance (log10 scale)",
-    y = NULL
-  ) +
+  labs(x = "Difference in abundance", y = NULL) +
   theme_diverge +
   theme(
-    axis.text.y = element_blank(),
+    axis.text.y  = element_blank(),
     axis.ticks.y = element_blank(),
-    axis.line.y = element_blank()
+    axis.line.y  = element_blank()
+  ) +
+  labs(tag = "b)")
+
+p_abund
+
+combined_fig <- p_rich + p_abund +
+  plot_layout(ncol = 2, widths = c(1, 2), guides = "collect") +
+  plot_annotation(
+    theme = ggplot2::theme(
+      legend.position = "bottom"
+    )
   )
 
-#---- combine ----
-  
-  combined_fig <- p_rich + p_abund +
-  plot_layout(ncol = 2, widths = c(1.0, 2.0), guides = "collect") &
-  theme(legend.position = "bottom")
+ggsave(
+  "Figure_Richness_Abundance_Divergence_A4_final.png",
+  combined_fig,
+  width = 16, height = 8, dpi = 1000
+)
 
-combined_fig
-
-#---- save ----
-  
-  ggsave(
-    "Figure_Richness_Abundance_Divergence_A4_final.png",
-    combined_fig,
-    width = 16,
-    height = 8,
-    units = "in",
-    dpi = 1000
-  )
+ggsave(
+  "figalphabetdiv.png",
+  combined_fig,
+  width = 16, height = 8, dpi = 1000
+)
 
 
-
-
-# 6.3 Per-group "abundance" but as record counts, not individuals
-# --- Grouped abundance function (records, not individualCount) ---
+#---- Per-group record-based abundance plots ----
+# (record counts per taxon_unit per group)
 
 plot_group_abundance <- function(df, grp_label, top_n = Inf) {
   
@@ -529,11 +590,13 @@ plot_group_abundance <- function(df, grp_label, top_n = Inf) {
   
   # Fill missing combinations
   dat <- dat0 %>%
-    tidyr::complete(taxon_unit, hillside = c("North", "South"),
-                    fill = list(records = 0)) %>%
+    tidyr::complete(
+      taxon_unit,
+      hillside = c("North", "South"),
+      fill = list(records = 0)
+    ) %>%
     mutate(hillside = factor(hillside, levels = c("North", "South")))
   
-  # Compute total records per species for ranking
   totals <- dat %>%
     group_by(taxon_unit) %>%
     summarise(total_records = sum(records), .groups = "drop")
@@ -553,11 +616,15 @@ plot_group_abundance <- function(df, grp_label, top_n = Inf) {
     mutate(taxon_unit = reorder(taxon_unit, total_records))
   
   ggplot(dat, aes(x = taxon_unit, y = records, fill = hillside)) +
-    geom_col(position = position_dodge(width = 0.7), 
-             width = 0.65, colour = "white") +
-    geom_text(aes(label = records),
-              position = position_dodge(width = 0.7),
-              hjust = -0.1, size = 3.2) +
+    geom_col(
+      position = position_dodge(width = 0.7), 
+      width = 0.65, colour = "white"
+    ) +
+    geom_text(
+      aes(label = records),
+      position = position_dodge(width = 0.7),
+      hjust = -0.1, size = 3.2
+    ) +
     coord_flip(clip = "off") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
     scale_fill_manual(values = c("North" = "#E76F51", "South" = "#0072B2")) +
@@ -596,11 +663,10 @@ plots_grouped_abundance <- lapply(major_groups, function(g) {
 plots_grouped_abundance
 
 
-#----overall abundance plot WITH OVERALL GROUP----
+#---- Overall abundance per group + overall group ----
 
-# 1. Compute abundance per group x hillside
 abund_group_ns <- assoc_use %>%
-  filter(group != "Other") %>%                      
+  filter(group != "Other") %>%
   group_by(group, hillside) %>%
   summarise(
     total_individuals = sum(individualCount, na.rm = TRUE),
@@ -610,7 +676,6 @@ abund_group_ns <- assoc_use %>%
     hillside = factor(hillside, levels = c("North","South"))
   )
 
-# 2. Create "Overall" totals for each hillside
 overall_ns <- assoc_use %>%
   filter(group != "Other") %>%
   group_by(hillside) %>%
@@ -623,24 +688,28 @@ overall_ns <- assoc_use %>%
     hillside = factor(hillside, levels = c("North","South"))
   )
 
-# 3. Bind rows + set factor order (groups then Overall last)
 abund_group_ns2 <- bind_rows(abund_group_ns, overall_ns) %>%
   mutate(
-    group = factor(group,
-                   levels = c(
-                     sort(unique(abund_group_ns$group)),
-                     "Overall"
-                   ))
+    group = factor(
+      group,
+      levels = c(
+        sort(unique(abund_group_ns$group)),
+        "Overall"
+      )
+    )
   )
 
-# 4. Log breaks
 log_breaks <- scales::log_breaks()(range(abund_group_ns2$total_individuals))
 
-# 5. Plot
-overall_abundance_plot <- ggplot(abund_group_ns2,
-                                 aes(x = group, y = total_individuals, fill = hillside)) +
-  geom_col(position = position_dodge(width = 0.75), width = 0.65,
-           colour = "white") +
+overall_abundance_plot <- ggplot(
+  abund_group_ns2,
+  aes(x = group, y = total_individuals, fill = hillside)
+) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.65,
+    colour = "white"
+  ) +
   geom_text(
     aes(label = total_individuals),
     position = position_dodge(width = 0.75),
@@ -665,29 +734,22 @@ overall_abundance_plot <- ggplot(abund_group_ns2,
   theme_minimal(base_size = 14) +
   theme(
     axis.text.x = element_text(angle = 30, hjust = 1),
-    axis.line = element_line(colour = "black"),
-    axis.ticks = element_line(colour = "black"),
-    panel.grid = element_blank(),
-    plot.title = element_text(face = "bold")
+    axis.line   = element_line(colour = "black"),
+    axis.ticks  = element_line(colour = "black"),
+    panel.grid  = element_blank(),
+    plot.title  = element_text(face = "bold")
   )
 
 overall_abundance_plot
 
 
+#---- Freshwater invertebrate environmental quality indicators ----
 
-
-
-
-
-
-#----Invertebrate environemntal quality indicators----
-####Freshwater Invertebrates####
 library(dplyr)
 library(ggplot2)
 library(stringr)
 library(patchwork)
 
-# clean data 
 assoc_use <- assoc_use %>%
   mutate(
     Pollutionscore = suppressWarnings(as.numeric(Pollutionscore)),
@@ -701,7 +763,7 @@ fresh_inverts <- assoc_use %>%
     Pollutionscore > 0
   )
 
-# aspt calculations 
+# Site-level and hillside-level BMWP / ASPT
 aspt_sites <- fresh_inverts %>%
   group_by(event_id, hillside) %>%
   summarise(
@@ -723,7 +785,7 @@ aspt_totals <- fresh_inverts %>%
 
 df <- bind_rows(aspt_sites, aspt_totals)
 
-# site labels
+# Site labels
 site_labels <- c(
   "ND4FI_A" = "Downstream NE",
   "NU4FI_A" = "Upstream NE",
@@ -739,7 +801,7 @@ site_labels <- c(
 
 small_gap <- 0.65
 group_gap <- 0.95
-big_gap <- 1.3
+big_gap   <- 1.3
 
 x_ND4FI_A <- 1
 x_NU4FI_A <- x_ND4FI_A + small_gap
@@ -768,12 +830,12 @@ positions <- c(
 
 df <- df %>%
   mutate(
-    x = positions[event_id],
-    label = site_labels[event_id],
+    x      = positions[event_id],
+    label  = site_labels[event_id],
     is_total = event_id %in% c("N_total", "S_total")
   )
 
-# heatmap data – now grouped by common_name_title (policy-friendly labels)
+# Heatmap data grouped by policy-friendly common names
 region_heat <- assoc_use %>%
   filter(group == "Freshwater invertebrates") %>%
   group_by(hillside, common_name_title) %>%
@@ -783,7 +845,7 @@ region_heat <- assoc_use %>%
     .groups = "drop"
   ) %>%
   mutate(
-    hillside         = factor(hillside, levels = c("North", "South")),
+    hillside          = factor(hillside, levels = c("North", "South")),
     common_name_title = factor(common_name_title, levels = sort(unique(common_name_title)))
   )
 
@@ -793,7 +855,7 @@ common_scale <- scale_fill_gradient(
   name = "BMWP Score"
 )
 
-###ASPT bar plot ##
+# ASPT bar plot
 plot_aspt <- ggplot(df, aes(x = x, y = ASPT, fill = hillside)) +
   geom_col(aes(width = ifelse(is_total, 0.8, 0.55)), colour = "white") +
   geom_text(
@@ -823,24 +885,30 @@ plot_aspt <- ggplot(df, aes(x = x, y = ASPT, fill = hillside)) +
     axis.text.y = element_text(face = "bold"),
     axis.line.x = element_line(colour = "black", linewidth = 1),
     axis.line.y = element_line(colour = "black", linewidth = 1),
-    axis.ticks = element_line(colour = "black"),
-    panel.grid = element_blank(),
+    axis.ticks  = element_line(colour = "black"),
+    panel.grid  = element_blank(),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
-    plot.title = element_text(face = "bold", size = 18),
+    plot.title  = element_text(face = "bold", size = 18),
     legend.position = "right"
   )
 
-# combined heatmap – y-axis is now common (English) names
-heatmap_combined <- ggplot(region_heat,
-                           aes(x = hillside,
-                               y = common_name_title,
-                               fill = bmwpscore)) +
+# Combined freshwater heatmap
+heatmap_combined <- ggplot(
+  region_heat,
+  aes(
+    x = hillside,
+    y = common_name_title,
+    fill = bmwpscore
+  )
+) +
   geom_tile(colour = "white", linewidth = 0.7) +
-  geom_text(aes(label = abundance),
-            colour = "black",
-            fontface = "bold",
-            size = 4) +
+  geom_text(
+    aes(label = abundance),
+    colour = "black",
+    fontface = "bold",
+    size = 4
+  ) +
   common_scale +
   labs(
     x = "Candidate site",
@@ -852,32 +920,20 @@ heatmap_combined <- ggplot(region_heat,
     axis.text.y = element_text(face = "bold"),
     axis.line.x = element_line(colour = "black"),
     axis.line.y = element_line(colour = "black"),
-    panel.grid = element_blank(),
+    panel.grid  = element_blank(),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
-    plot.title = element_text(face = "bold", size = 18),
+    plot.title  = element_text(face = "bold", size = 18),
     legend.position = "right"
   )
 
-
-# print plots
 plot_aspt
 heatmap_combined
 
 
+#---- Terrestrial invertebrate habitat quality metrics ----
 
-
-
-####Moths, terrestrial invertebrates and Overall environmental comparison####
 library(tidyverse)
-
-# ---- Derive Terrestrial Invertebrate Traits from assoc_use ----
-
-# expects assoc_use with:
-# - group (includes "Terrestrial invertebrates")
-# - hillside (North / South)
-# - order_name, common_name, scientific_name
-# - individualCount (abundance)
 
 terrestrial_traits <- assoc_use %>%
   filter(
@@ -905,12 +961,12 @@ terrestrial_traits <- assoc_use %>%
     ),
     
     trophic_score = case_when(
-      str_detect(order_lc, "araneae|opiliones") ~ 2,                                 # spiders, harvestmen
-      str_detect(cname_lc, "ground beetle|carabid") ~ 2,                             # ground beetles
-      str_detect(cname_lc, "woodlouse|millipede|centipede|earthworm|slug|snail") ~ 1,# detritivores
-      str_detect(order_lc, "coleoptera") ~ 1.5,                                      # many beetles pred/scav
-      str_detect(order_lc, "hymenoptera") ~ 1,                                       # ants, many omnivores
-      TRUE ~ 0.5                                                                     # default herbivore/low-signal
+      str_detect(order_lc, "araneae|opiliones") ~ 2,
+      str_detect(cname_lc, "ground beetle|carabid") ~ 2,
+      str_detect(cname_lc, "woodlouse|millipede|centipede|earthworm|slug|snail") ~ 1,
+      str_detect(order_lc, "coleoptera") ~ 1.5,
+      str_detect(order_lc, "hymenoptera") ~ 1,
+      TRUE ~ 0.5
     ),
     
     saproxylic_score = case_when(
@@ -934,17 +990,15 @@ habitat_quality <- terrestrial_traits %>%
     .groups = "drop"
   )
 
-# ---- Terrestrial Invertebrate Metric Breakdown ----
-
 habitat_scaled <- habitat_quality %>%
   mutate(
-    woodland      = woodland_raw   / max(woodland_raw,   na.rm = TRUE),
-    moisture      = moisture_raw   / max(moisture_raw,   na.rm = TRUE),
-    trophic       = trophic_raw    / max(trophic_raw,    na.rm = TRUE),
-    saproxylic    = saproxylic_raw / max(saproxylic_raw, na.rm = TRUE),
-    Average       = habitat_raw    / max(habitat_raw,    na.rm = TRUE)   # renamed
+    woodland   = woodland_raw   / max(woodland_raw,   na.rm = TRUE),
+    moisture   = moisture_raw   / max(moisture_raw,   na.rm = TRUE),
+    trophic    = trophic_raw    / max(trophic_raw,    na.rm = TRUE),
+    saproxylic = saproxylic_raw / max(saproxylic_raw, na.rm = TRUE),
+    Average    = habitat_raw    / max(habitat_raw,    na.rm = TRUE)
   ) %>%
-  select(hillside, woodland, moisture, trophic, saproxylic, Average)      # reordered
+  select(hillside, woodland, moisture, trophic, saproxylic, Average)
 
 hab_plot <- habitat_scaled %>%
   pivot_longer(
@@ -953,15 +1007,16 @@ hab_plot <- habitat_scaled %>%
     values_to = "score"
   ) %>%
   mutate(
-    metric = factor(metric, 
-                    levels = c("woodland", "moisture", "trophic", 
-                               "saproxylic", "Average"))  # Average moved to end
+    metric = factor(
+      metric, 
+      levels = c("woodland", "moisture", "trophic", "saproxylic", "Average")
+    )
   )
 
-# ---- Terrestrial Invertebrate Plot with Solid Axes ----
-
-p_terrestrial <- ggplot(hab_plot,
-                        aes(x = metric, y = score, fill = hillside)) +
+p_terrestrial <- ggplot(
+  hab_plot,
+  aes(x = metric, y = score, fill = hillside)
+) +
   geom_col(
     width = 0.6,
     position = position_dodge(width = 0.75)
@@ -985,18 +1040,16 @@ p_terrestrial <- ggplot(hab_plot,
   theme_minimal(base_size = 15) +
   theme(
     axis.text.x = element_text(angle = 25, hjust = 1),
-    panel.grid = element_blank(),
+    panel.grid  = element_blank(),
     axis.line.x = element_line(colour = "black", linewidth = 1),
     axis.line.y = element_line(colour = "black", linewidth = 1)
   )
 
 p_terrestrial
 
-# ---- Environmental Comparison Plot with Solid Axes + Non-Overlapping Bars ----
-# ---- Build Moth Air-Quality (Nitrogen Pollution) Score ----
-# ---- Moth nitrogen air-quality score ----
-# ---- UK Nitrogen Sensitivity Classification ----
-# ---- Species name standardisation table ----
+
+#---- Moth nitrogen air-quality score ----
+
 name_corrections <- tribble(
   ~raw,                   ~clean,
   "autuml rustic",        "autumn rustic",
@@ -1043,13 +1096,6 @@ tolerant_species <- c(
   "pug"
 )
 
-# scoring:
-# 3 = sensitive (good)
-# 2 = neutral
-# 1 = tolerant (bad)
-
-# ---- Robust nitrogen scoring with automatic name correction ----
-
 moth_data <- assoc_use %>%
   filter(
     str_detect(order_name, regex("lepidoptera", ignore_case = TRUE)),
@@ -1059,23 +1105,19 @@ moth_data <- assoc_use %>%
   mutate(
     cname_lc = tolower(common_name)
   ) %>%
-  # apply name corrections
-  left_join(name_corrections,
-            by = c("cname_lc" = "raw")) %>%
+  left_join(
+    name_corrections,
+    by = c("cname_lc" = "raw")
+  ) %>%
   mutate(
     clean_name = coalesce(clean, cname_lc),
-    
     nitrogen_score = case_when(
-      clean_name %in% sensitive_species ~ 3,   # sensitive = high score
-      clean_name %in% tolerant_species ~ 1,    # tolerant = low score
-      TRUE ~ 2                                 # neutral
+      clean_name %in% sensitive_species ~ 3,
+      clean_name %in% tolerant_species ~ 1,
+      TRUE ~ 2
     ),
-    
     air_weighted = nitrogen_score * log1p(individualCount)
   )
-
-
-
 
 air_quality <- moth_data %>%
   group_by(hillside) %>%
@@ -1084,10 +1126,13 @@ air_quality <- moth_data %>%
     .groups = "drop"
   )
 
+
+#---- Combined environmental scores (air, terrestrial, freshwater) ----
+
 combined_scores_raw <- air_quality %>%
   rename(air_raw = score_raw) %>%
   left_join(
-    habitat_scaled %>% select(hillside, Average),  # from your updated terrestrial plot
+    habitat_scaled %>% select(hillside, Average),
     by = "hillside"
   ) %>%
   rename(habitat_raw = Average) %>%
@@ -1098,15 +1143,11 @@ combined_scores_raw <- air_quality %>%
     by = "hillside"
   )
 
-# ---- Wide format for scaling ----
-
 w <- combined_scores_raw %>%
   pivot_wider(
     names_from = hillside,
     values_from = c(air_raw, habitat_raw, freshwater_raw)
   )
-
-# ---- Scaling helpers ----
 
 scale_to_one <- function(xN, xS) {
   maxv <- max(xN, xS, na.rm = TRUE)
@@ -1116,8 +1157,6 @@ scale_to_one <- function(xN, xS) {
 safe_extract <- function(df, colname) {
   df %>% pull({{colname}}) %>% unique() %>% max(na.rm = TRUE)
 }
-
-# ---- Apply scaling to all 3 metrics ----
 
 air_scaled <- scale_to_one(
   safe_extract(w, air_raw_North),
@@ -1134,8 +1173,6 @@ fresh_scaled <- scale_to_one(
   safe_extract(w, freshwater_raw_South)
 )
 
-# ---- Combined scaled values ----
-
 scaled_scores <- tibble(
   test = c(
     "Air Pollution (Moths)",
@@ -1146,15 +1183,11 @@ scaled_scores <- tibble(
   South = c(air_scaled$S, fresh_scaled$S, hab_scaled$S)
 )
 
-# ---- Overall score ----
-
 overall_scores <- tibble(
   test = "Overall Environmental Score",
   North = mean(scaled_scores$North, na.rm = TRUE),
   South = mean(scaled_scores$South, na.rm = TRUE)
 )
-
-# ---- Long format for plotting ----
 
 plot_scores <- scaled_scores %>%
   bind_rows(overall_scores) %>%
@@ -1163,8 +1196,6 @@ plot_scores <- scaled_scores %>%
     names_to = "hillside",
     values_to = "scaled_score"
   )
-
-# ---- Plot: All environmental metrics ----
 
 p_all_env <- ggplot(
   plot_scores,
@@ -1193,7 +1224,7 @@ p_all_env <- ggplot(
   theme_minimal(base_size = 15) +
   theme(
     axis.text.x = element_text(angle = 20, hjust = 1),
-    panel.grid = element_blank(),
+    panel.grid  = element_blank(),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     axis.line.x = element_line(colour = "black", linewidth = 1),
@@ -1203,12 +1234,11 @@ p_all_env <- ggplot(
 p_all_env
 
 
+#---- BoCC5 bird status lists & harmonisation ----
+# (Kept structurally identical to your original – just under a header)
 
-
-# ---- Birds: BoCC5 lists ----
 bocc5_part1 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
-  
   # RED LIST
   "house sparrow", "passer domesticus", "Red", "Passeriformes", "Passeridae",
   "tree sparrow", "passer montanus", "Red", "Passeriformes", "Passeridae",
@@ -1235,7 +1265,6 @@ bocc5_part1 <- tribble(
   "hen harrier", "circus cyaneus", "Red", "Accipitriformes", "Accipitridae",
   "golden eagle", "aquila chrysaetos", "Red", "Accipitriformes", "Accipitridae",
   "osprey", "pandion haliaetus", "Red", "Accipitriformes", "Pandionidae",
-  
   # AMBER LIST BEGIN
   "rock pipit", "anthus petrosus", "Amber", "Passeriformes", "Motacillidae",
   "grey wagtail", "motacilla cinerea", "Amber", "Passeriformes", "Motacillidae",
@@ -1260,32 +1289,24 @@ bocc5_part1 <- tribble(
   "greenfinch", "chloris chloris", "Amber", "Passeriformes", "Fringillidae",
   "chaffinch", "fringilla coelebs", "Amber", "Passeriformes", "Fringillidae",
   "brambling", "fringilla montifringilla", "Amber", "Passeriformes", "Fringillidae",
-  
-  # Continue Amber species
   "jackdaw", "corvus monedula", "Amber", "Passeriformes", "Corvidae",
   "rook", "corvus frugilegus", "Amber", "Passeriformes", "Corvidae",
   "carrion crow", "corvus corone", "Amber", "Passeriformes", "Corvidae",
   "raven", "corvus corax", "Amber", "Passeriformes", "Corvidae",
   "magpie", "pica pica", "Amber", "Passeriformes", "Corvidae",
   "jay", "garrulus glandarius", "Amber", "Passeriformes", "Corvidae",
-  
   "wood pigeon", "columba palumbus", "Amber", "Columbiformes", "Columbidae",
   "stock dove", "columba oenas", "Amber", "Columbiformes", "Columbidae",
   "collared dove", "streptopelia decaocto", "Amber", "Columbiformes", "Columbidae",
-  
-  # WADERS
   "lapwing", "vanellus vanellus", "Amber", "Charadriiformes", "Charadriidae",
   "oystercatcher", "haematopus ostralegus", "Amber", "Charadriiformes", "Haematopodidae",
   "curlew", "numenius arquata", "Amber", "Charadriiformes", "Scolopacidae",
   "snipe", "gallinago gallinago", "Amber", "Charadriiformes", "Scolopacidae",
   "woodcock", "scolopax rusticola", "Amber", "Charadriiformes", "Scolopacidae",
-  
-  # GULLS
   "herring gull", "larus argentatus", "Amber", "Charadriiformes", "Laridae",
   "kittiwake", "rissa tridactyla", "Amber", "Charadriiformes", "Laridae",
   "common gull", "larus canus", "Amber", "Charadriiformes", "Laridae"
 )
-
 bocc5_part2 <- tribble(
   ~common_name, ~scientific_name, ~bocc_status, ~order, ~family,
   
@@ -2189,7 +2210,7 @@ p_cs_rich <- ggplot(df_cs_div, aes(y = group)) +
   ) +
   labs(title = "Candidate site species richness by group") +
   theme_diverge
-
+p_cs_rich
 # -----------------------------------------------------------
 # PLOT 2 — Candidate Site Important Species
 # -----------------------------------------------------------
@@ -2214,10 +2235,20 @@ p_cs_imp <- ggplot(df_imp_cs_div, aes(y = group)) +
 # -----------------------------------------------------------
 # COMBINE SIDE-BY-SIDE
 # -----------------------------------------------------------
-combined_cs <- p_cs_rich + p_cs_imp +
-  plot_layout(ncol = 2, widths = c(1.3, 1), guides = "collect") &
-  theme(legend.position = "bottom") &
-  guides(fill = guide_legend(title = "Candidate site"))
+library(patchwork)
+
+combined_cs <- wrap_elements(p_cs_rich) + wrap_elements(p_cs_imp)
+
+combined_cs <- combined_cs +
+  plot_layout(
+    ncol = 2,
+    widths = c(1.3, 1),
+    guides = "collect"
+  ) &
+  theme(
+    legend.position = "bottom"
+  )
+
 
 combined_cs
 
@@ -2231,6 +2262,7 @@ ggsave(
   height = 8,
   dpi = 600
 )
+
 
 
 
