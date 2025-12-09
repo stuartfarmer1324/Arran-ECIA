@@ -57,8 +57,8 @@ make_pie <- function(df, title){
 # -----------------------------
 # Generate each pie
 # -----------------------------
-p_north <- make_pie(north, "North slope")
-p_south <- make_pie(south, "South slope")
+p_north <- make_pie(north, "North")
+p_south <- make_pie(south, "South")
 
 # -----------------------------
 # Final layout:
